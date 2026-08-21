@@ -14,7 +14,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "playwright test",
+    "test": "playwright test --project=chromium",
+    "bench": "playwright test --project=bench",
+    "check": "node --check src/chromakey.js && npm run check:size",
+    "check:size": "node scripts/check-size.mjs",
     "serve": "node test/serve.mjs"
   },
   "keywords": [
@@ -27,6 +30,7 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "@playwright/test": "^1.49.0"
+    "@playwright/test": "^1.49.0",
+    "esbuild": "^0.28.2"
   }
 }

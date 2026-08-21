@@ -22,5 +22,9 @@ export default defineConfig({
     port: 4173,
     reuseExistingServer: !process.env.CI,
   },
-  projects: [{ name: 'chromium' }],
+  projects: [
+    { name: 'chromium', testMatch: /e2e\.spec\.js/ },
+    // Benchmark runs on demand (npm run bench), not with the default suite.
+    { name: 'bench', testMatch: /bench\.spec\.js/, timeout: 120_000 },
+  ],
 });
