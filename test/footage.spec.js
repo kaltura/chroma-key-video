@@ -1,23 +1,28 @@
 // Real-footage quality tests.
 //
 // The synthetic e2e patterns validate the keying math pixel-exactly; these
-// clips validate it against reality: a presenter over a flat green screen
+// clips validate it against reality: presenters over a flat green screen
 // (720p h264, 4 s each, committed under test/assets/ so CI runs offline).
 // Real footage carries codec noise, uneven lighting, hair detail, and soft
 // shadows, so assertions here are statistical — population fractions and
 // sampled regions — not exact pixel values.
+//
+// greenscreen-hair.mp4 (Pixabay, Content License) is the stress case:
+// long wind-blown hair with loose flying strands and green bounce light
+// on the skin — the classic hard keying scenario.
 //
 // Each clip runs through both backends: seek to a fixed frame, auto-tune,
 // render once, then analyze the full output canvas.
 
 import { test, expect } from '@playwright/test';
 
-const CLIPS = ['greenscreen-talk.mp4', 'greenscreen-calm.mp4'];
+const CLIPS = ['greenscreen-talk.mp4', 'greenscreen-calm.mp4', 'greenscreen-hair.mp4'];
 const SEEK_TIME = 2.0;
 
-// Fractional sample points chosen from the footage: the presenter sits
-// center-frame (head around y 0.2-0.5, sweater filling bottom-center);
-// the margins and corners are pure green screen in every frame.
+// Fractional sample points chosen from the footage: in all three clips the
+// presenter sits center-frame (head around y 0.2-0.5, torso filling
+// bottom-center); the margins and corners are pure green screen in every
+// frame, verified per-clip at the seek frame.
 const BACKGROUND_POINTS = [
   [0.03, 0.05], [0.97, 0.05],   // top corners
   [0.03, 0.50], [0.97, 0.50],   // mid-height margins
