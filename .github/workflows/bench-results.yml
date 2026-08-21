@@ -1,0 +1,67 @@
+# Ingest bench-result issues into bench-results-devices.jsonl + DEVICES.md.
+# Triggered when an issue with the bench-result label (applied by the issue
+# template) is opened or edited. The issue body is untrusted — it is passed
+# to the ingest script only via the ISSUE_JSON env var (never interpolated
+# into shell), and the script sanitizes everything it commits.
+name: Ingest bench results
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: bench-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    if: contains(github.event.issue.labels.*.name, 'bench-result')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Ingest result
+        id: ingest
+        continue-on-error: true
+        env:
+          ISSUE_JSON: ${{ toJSON(github.event.issue) }}
+        run: node scripts/ingest-bench-issue.mjs
+
+      - name: Commit data + leaderboard
+        if: steps.ingest.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench-results-devices.jsonl DEVICES.md
+          if git diff --cached --quiet; then
+            echo "nothing to commit (duplicate result)"
+          else
+            git commit -m "chore(bench): ingest device result from #${{ github.event.issue.number }}"
+            git pull --rebase origin main
+            git push origin main
+          fi
+
+      - name: Comment and close (ingested)
+        if: steps.ingest.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --body-file ingest-comment.md
+          gh issue close "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --reason completed
+
+      - name: Comment (invalid — stays open for edits)
+        if: steps.ingest.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --body-file ingest-comment.md

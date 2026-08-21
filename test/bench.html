@@ -1,0 +1,168 @@
+<!doctype html>
+<!-- Self-service benchmark page. Open it anywhere (GitHub Pages or npm run
+     serve), press Run, and share the numbers back as a GitHub issue — an
+     Action ingests labeled issues into bench-results-devices.jsonl and
+     DEVICES.md. Measurement code is shared with the Playwright bench spec
+     via bench-core.js, so page numbers and CI numbers are comparable. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chroma-key-video — device benchmark</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 24px; background: #14161a; color: #e8eaed;
+         font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #9aa0a6; margin: 0 0 20px; }
+  .card { background: #1c1f24; border: 1px solid #2b2f36; border-radius: 10px;
+          padding: 16px 18px; margin: 0 0 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  select, button { font: inherit; border-radius: 8px; border: 1px solid #3a3f47;
+                   background: #23272e; color: #e8eaed; padding: 8px 14px; }
+  button { cursor: pointer; }
+  button.primary { background: #2e7d46; border-color: #2e7d46; font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { color: #8ab4f8; min-height: 1.5em; margin: 12px 0 0; }
+  /* The render buffer is sized from the canvas layout box, so the stage
+     scrolls instead of shrinking its players — a 1280x720 layout box on
+     every device keeps results comparable. */
+  #stage { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px;
+           overflow: auto; max-height: 340px; }
+  #stage canvas { flex: none; border-radius: 4px;
+                  background: repeating-conic-gradient(#2a2d33 0% 25%, #212429 0% 50%) 0 0 / 16px 16px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid #2b2f36; }
+  th { color: #9aa0a6; font-weight: 500; }
+  td:last-child { font-variant-numeric: tabular-nums; }
+  .device { color: #9aa0a6; font-size: 13px; word-break: break-all; }
+  .error { color: #f28b82; }
+  a { color: #8ab4f8; }
+</style>
+</head>
+<body>
+<main>
+  <h1>chroma-key-video device benchmark</h1>
+  <p class="sub">Measures real-time green-screen keying performance on <em>this</em> device
+     and browser: per-frame render cost, auto-tune, sustained fps for 1 and 12
+     concurrent players, and main-thread jank. Takes about 30 seconds per source.</p>
+
+  <div class="card">
+    <div class="row">
+      <label for="source">Source</label>
+      <select id="source">
+        <option value="both" selected>Synthetic + real footage</option>
+        <option value="synthetic">Synthetic pattern only</option>
+        <option value="footage">Real footage only (720p hair clip)</option>
+      </select>
+      <button id="run" class="primary">Run benchmark</button>
+    </div>
+    <p id="status"></p>
+    <div id="stage"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <div class="card" id="shareCard" hidden>
+    <div class="row">
+      <button id="share" class="primary">Share results on GitHub</button>
+      <button id="copy">Copy JSON</button>
+      <span id="shareNote" class="device"></span>
+    </div>
+    <p class="device" style="margin: 10px 0 0">Sharing opens a prefilled GitHub issue
+       (needs a GitHub account). A bot ingests it into the public
+       <a href="https://github.com/kaltura/chroma-key-video/blob/main/DEVICES.md">device results table</a>.
+       Only the numbers above and your browser's user-agent string are included.</p>
+  </div>
+
+  <div class="card device" id="deviceCard"></div>
+</main>
+
+<script type="module">
+  import { runBenchmark, deviceInfo, resultRows } from './bench-core.js';
+
+  const REPO = 'kaltura/chroma-key-video';
+  const FOOTAGE = './assets/greenscreen-hair.mp4';
+  const $ = (id) => document.getElementById(id);
+
+  const device = deviceInfo();
+  $('deviceCard').textContent =
+    `${device.userAgent} · ${device.hardwareConcurrency || '?'} cores` +
+    `${device.deviceMemory ? ` · ${device.deviceMemory}GB` : ''}` +
+    ` · ${device.screen} @ ${device.devicePixelRatio}x`;
+
+  let payload = null;
+
+  function renderRun(r) {
+    const rows = resultRows(r)
+      .map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    $('results').insertAdjacentHTML('beforeend',
+      `<div class="card"><table>
+         <tr><th>Measurement</th><th>Result</th></tr>${rows}
+       </table></div>`);
+  }
+
+  async function run() {
+    $('run').disabled = true;
+    $('source').disabled = true;
+    $('results').innerHTML = '';
+    $('shareCard').hidden = true;
+    payload = null;
+
+    const choice = $('source').value;
+    const sources = choice === 'both' ? [null, FOOTAGE]
+      : choice === 'footage' ? [FOOTAGE] : [null];
+    const runs = [];
+
+    try {
+      for (const src of sources) {
+        const label = src ? 'real footage' : 'synthetic';
+        const r = await runBenchmark({
+          src,
+          stage: $('stage'),
+          onProgress: (m) => { $('status').textContent = `[${label}] ${m}`; },
+        });
+        runs.push(r);
+        renderRun(r);
+      }
+      payload = { device, runs, page: 'bench.html', timestamp: new Date().toISOString() };
+      $('status').textContent = 'Done. Share your results so this device shows up in the public table.';
+      $('shareCard').hidden = false;
+      // Local dev collector (test/serve.mjs). On GitHub Pages this 404s — fine.
+      fetch('../bench-results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    } catch (err) {
+      $('status').innerHTML = `<span class="error">Benchmark failed: ${err && err.message || err}</span>`;
+    } finally {
+      $('run').disabled = false;
+      $('source').disabled = false;
+      $('stage').innerHTML = '';
+    }
+  }
+
+  $('run').addEventListener('click', run);
+
+  $('copy').addEventListener('click', async () => {
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    $('shareNote').textContent = 'Copied.';
+  });
+
+  $('share').addEventListener('click', () => {
+    const summary = payload.runs.map((r) =>
+      `${r.source.startsWith('synthetic') ? 'synthetic' : 'footage'}: key ${r.webglKeyMs}ms, fps1 ${r.fps1}`).join(' | ');
+    const title = `[bench] ${device.platform || 'unknown'} — ${summary}`;
+    const url = `https://github.com/${REPO}/issues/new` +
+      `?template=bench-result.yml` +
+      `&title=${encodeURIComponent(title)}` +
+      `&results=${encodeURIComponent(JSON.stringify(payload, null, 2))}`;
+    window.open(url, '_blank');
+  });
+
+  window.benchReady = true;
+</script>
+</body>
+</html>

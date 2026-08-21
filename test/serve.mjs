@@ -1,6 +1,10 @@
 // Minimal static file server for the e2e suite and demo. Zero dependencies.
+// Also accepts POST /bench-results from test/bench.html and appends each
+// payload to bench-results-local.jsonl (gitignored) — a local collector for
+// benching devices on your own network. Public collection goes through
+// GitHub issues instead (see .github/ISSUE_TEMPLATE/bench-result.yml).
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { appendFile, readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +25,16 @@ const MIME = {
 createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
+    if (req.method === 'POST' && url.pathname === '/bench-results') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      JSON.parse(body); // non-JSON falls through to the catch below
+      await appendFile(join(root, 'bench-results-local.jsonl'), body.replace(/\n/g, '') + '\n');
+      res.writeHead(204);
+      res.end();
+      console.log('bench result collected -> bench-results-local.jsonl');
+      return;
+    }
     let pathname = decodeURIComponent(url.pathname);
     if (pathname.endsWith('/')) pathname += 'index.html';
     const filePath = join(root, normalize(pathname).replace(/^(\.\.[/\\])+/, ''));

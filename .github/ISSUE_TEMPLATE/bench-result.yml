@@ -1,0 +1,31 @@
+# Submission form for device benchmark results. The bench page
+# (test/bench.html) prefills this via URL parameters; the bench-results
+# workflow ingests labeled issues into bench-results-devices.jsonl and
+# regenerates DEVICES.md. The label must come from this template — the
+# labels= URL parameter only works for users with push access.
+name: Benchmark result
+description: Share device benchmark results from the bench page
+title: "[bench] device results"
+labels: ["bench-result"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for benchmarking! If you came from the
+        [bench page](https://kaltura.github.io/chroma-key-video/test/bench.html)'s
+        **Share results** button, the JSON below is already filled in — just submit.
+        A bot will validate it, add your device to [DEVICES.md](../blob/main/DEVICES.md),
+        and close this issue.
+  - type: textarea
+    id: results
+    attributes:
+      label: Results JSON
+      description: Paste the JSON from the bench page ("Copy JSON" button).
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: notes
+    attributes:
+      label: Notes (optional)
+      description: Device model, browser version, anything unusual during the run.

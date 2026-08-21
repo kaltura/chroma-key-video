@@ -199,21 +199,30 @@ Everything evergreen: Chrome/Edge, Firefox, Safari 15.4+ (including iOS). The li
 ```bash
 npm install
 npm test              # e2e + real-footage suite (22 tests)
-npm run bench         # performance benchmark -> bench-results.json
+npm run bench         # performance benchmark (Chromium) -> bench-results.json
+npm run bench:all     # benchmark on Chromium + Firefox + WebKit
 npm run check         # syntax check + bundle size budget gate
 ```
 
 The e2e suite (Playwright, headless Chromium with SwiftShader) generates synthetic green/blue-screen test patterns via `canvas.captureStream()`, renders them through the library, and asserts output pixels: transparency, ramp alpha, spill values, WebGL↔Canvas2D parity, 12 concurrent instances, edge fades, orientation, destroy semantics, the custom element, the encoded-URL source path, plugin lifecycle and error isolation, one-shot and adaptive auto-tune (including convergence), and the `auto-tune` element attribute.
 
-The real-footage suite (`test/footage.spec.js`) runs three short 720p h264 clips of presenters over a green screen (committed in `test/assets/`, so CI stays offline) through both backends: two studio talking-head clips and a stress clip with long wind-blown hair — loose flying strands and green bounce light on the skin, the classic hard keying case (sourced from Pixabay under the Pixabay Content License). Real footage carries codec noise, uneven lighting, hair detail, and soft shadows the synthetic patterns can't, so its assertions are statistical: after seeking to a fixed frame and auto-tuning, the background margins are fully transparent, the face and body are fully opaque, the transparent/opaque population fractions are in range, and under 0.5% of visible pixels keep a strong green cast (measured ~0.04%).
+The real-footage suite (`test/footage.spec.js`) runs three short 720p h264 clips of presenters over a green screen (committed in `test/assets/`, so CI stays offline) through both backends: two studio talking-head clips and a stress clip with long wind-blown hair — loose flying strands and green bounce light on the skin, the classic hard keying case (sourced from Pixabay under the Pixabay Content License). Real footage carries codec noise, uneven lighting, hair detail, and soft shadows the synthetic patterns can't, so its assertions are statistical: after seeking to a fixed frame and auto-tuning, the background margins are fully transparent, the face and body are fully opaque, the transparent/opaque population fractions are in range, and the fraction of visible pixels keeping a strong green cast stays under a per-clip ceiling (0.5% for the studio clips, 0.05% for the hair stress clip).
 
-The benchmark (`test/bench.spec.js`) measures per-frame render cost (WebGL key pass, edgeDissolve, Canvas2D fallback), `autoTune()` cost, sustained fps for 1×720p and 12 concurrent players, and main-thread jank — on a synthetic 720p source, so it runs offline. It fails only on order-of-magnitude regressions (ceilings sized for SwiftShader); absolute numbers land in `bench-results.json` and, on GitHub Actions, the job summary.
+The benchmark (`test/bench.spec.js`, measurement logic in `test/bench-core.js`) measures per-frame render cost (WebGL key pass, edgeDissolve, Canvas2D fallback), `autoTune()` cost, sustained fps for 1×720p and 12 concurrent players, and main-thread jank — on a synthetic 720p source, so it runs offline. `BENCH_SRC=test/assets/greenscreen-hair.mp4 npm run bench` runs it on real footage instead. It fails only on order-of-magnitude regressions (ceilings sized for SwiftShader); absolute numbers land in `bench-results{-firefox,-webkit}{-footage}.json` and, on GitHub Actions, the job summary. `npm run bench:all` runs the same suite on Chromium, Firefox, and WebKit (one Playwright project per engine).
 
 The size gate (`scripts/check-size.mjs`) minifies the whole library with esbuild and enforces budgets (24 KB minified, 8 KB gzip). Raising a budget is a deliberate edit in the same commit as the feature that needs it.
 
 `.github/workflows/ci.yml` runs all of the above on every push and PR: syntax check → size gate → e2e tests → benchmark (results uploaded as an artifact).
 
+## Benchmark your device
+
+Open **[the bench page](https://kaltura.github.io/chroma-key-video/test/bench.html)** on any device — phone, tablet, laptop — and hit *Run benchmark*. It runs the exact same measurement suite as CI (synthetic pattern and/or the real hair footage) and shows the results in ~30 seconds per source.
+
+Then hit **Share results**: it opens a prefilled GitHub issue with your numbers as JSON. A bot validates the submission, adds your device to **[DEVICES.md](DEVICES.md)** (the community leaderboard), and closes the issue. No account data beyond what your browser exposes (user agent, GPU renderer string, core count) is collected.
+
 ## Demo
+
+Live at **[kaltura.github.io/chroma-key-video/demo](https://kaltura.github.io/chroma-key-video/demo/)**, or locally:
 
 ```bash
 npm run serve

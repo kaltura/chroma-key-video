@@ -17,6 +17,9 @@
     "test": "playwright test --project=chromium",
     "bench": "playwright test --project=bench",
     "bench:footage": "BENCH_SRC=/test/assets/greenscreen-hair.mp4 playwright test --project=bench",
+    "bench:firefox": "playwright test --project=bench-firefox",
+    "bench:webkit": "playwright test --project=bench-webkit",
+    "bench:all": "playwright test --project=bench --project=bench-firefox --project=bench-webkit",
     "check": "node --check src/chromakey.js && npm run check:size",
     "check:size": "node scripts/check-size.mjs",
     "serve": "node test/serve.mjs"
