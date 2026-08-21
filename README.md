@@ -169,7 +169,7 @@ keyed when: key is the max channel, key > minKey, key > otherA*bias,
 alpha = 1 - clamp((dom - 2) / max(8, softness*0.55) + (sat - 0.08)*1.8, 0, 1)
 ```
 
-Pixels that fail the gate but still carry a key cast (`dom > 8`, `key > 70`) get `dom * spill` subtracted from the key channel — that removes the green fringe on hair and shoulders without keying them.
+Keyed pixels are also fully despilled — the key channel is clamped to the max of the other two — so partially keyed edge pixels composite without a green halo. Pixels that fail the gate but still carry a key cast (`dom > 4`, `key > 40`) get `dom * spill` subtracted from the key channel, which removes the residual cast on hair and shoulders without keying them.
 
 With `edgeDissolve`, the keyed layer additionally runs through a separable 9-tap Gaussian blur mixed in by a bottom-anchored vignette (with desaturation toward luma), plus explicit top/bottom alpha fade ramps and a redundant CSS mask fade.
 

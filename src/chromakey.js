@@ -9,9 +9,10 @@
  * - **Dominant-channel keying, not fixed-color distance.** Each pixel is
  *   classified by how much its key channel dominates the other two, so no
  *   exact reference color is needed and the key survives codec color drift.
- * - **Continuous key ramp + separate spill suppression.** Edge pixels get
- *   anti-aliased partial alpha, and near-key pixels (hair, shoulders under
- *   green bounce light) get their green cast removed without being keyed.
+ * - **Continuous key ramp + despill.** Edge pixels get anti-aliased partial
+ *   alpha with their key-color cast fully removed (no green halo), and
+ *   near-key pixels (hair, shoulders under green bounce light) get their
+ *   cast reduced without being keyed.
  * - **One shared WebGL context for all instances.** Browsers limit live
  *   WebGL contexts (~8-16). All instances render through a single hidden GL
  *   canvas and blit to their own cheap 2D display canvas, so any number of
@@ -133,10 +134,12 @@ void main() {
  *
  * Two code paths per pixel:
  *  - Background (`keyed`): continuous alpha ramp — anti-aliased edges with
- *    no extra blur-the-matte pass.
+ *    no extra blur-the-matte pass. Keyed pixels are also fully despilled
+ *    (key channel clamped to the max of the other two): a partially keyed
+ *    edge pixel that kept its key color would composite as a green halo
+ *    around hair and shoulders.
  *  - Spill: pixels that did NOT key but still carry a key-color cast get the
- *    cast subtracted, proportional to dominance. This is the main defense
- *    against a green fringe on hair and shoulders.
+ *    cast subtracted, proportional to dominance and the `spill` option.
  *
  * Output is premultiplied alpha (required for correct GL compositing and
  * for the downstream blur pass to weigh transparent pixels correctly).
@@ -170,7 +173,8 @@ void main() {
     float keyed = clamp((dom - 2.0) / max(8.0, u_softness * 0.55)
                         + (sat - 0.08) * 1.8, 0.0, 1.0);
     alpha *= 1.0 - keyed;
-  } else if (dom > 8.0 && key > 70.0) {
+    color.${KEY} = max(oA, oB) / 255.0;
+  } else if (dom > 4.0 && key > 40.0) {
     color.${KEY} = max(0.0, key - dom * u_spill) / 255.0;
   }
 
@@ -266,12 +270,14 @@ const CHANNEL_OFFSETS = {
  * (key is the max channel, sat > 0.06, dom > 4, key > 30). Percentiles over
  * the candidates then set the thresholds with safety margin:
  *
- * - `minKey`: 60% of the 5th-percentile candidate key value — comfortably
- *   below the dimmest backdrop pixel, above typical foreground key levels.
- * - `bias`: 80% of the 10th-percentile key/other ratio, capped at 1.02 so
- *   near-neutral edge pixels keep partially keying.
+ * - `minKey`: 30% of the 5th-percentile candidate key value — comfortably
+ *   below the dimmest backdrop pixel and the dark blends at hair and
+ *   shoulder edges, above typical foreground key levels.
+ * - `bias`: 70% of the 10th-percentile key/other ratio, capped at 0.98 so
+ *   near-neutral edge blends still enter the key ramp instead of surviving
+ *   as a fringe.
  * - `softness`: scaled dominance spread — noisy or unevenly lit backdrops
- *   get a wider alpha ramp.
+ *   get a wider alpha ramp; the floor keeps real-footage edges soft.
  *
  * `spill` is aesthetic and left untouched.
  *
@@ -314,9 +320,9 @@ function deriveKeyParams(image, channel) {
     ok: true,
     backgroundFraction,
     params: {
-      minKey: clamp(Math.round(pct(keys, 0.05) * 0.6), 16, 110),
-      bias: clamp(Math.round(pct(ratios, 0.10) * 80) / 100, 0.85, 1.02),
-      softness: clamp(Math.round((pct(doms, 0.50) - pct(doms, 0.05)) * 1.2), 12, 90),
+      minKey: clamp(Math.round(pct(keys, 0.05) * 0.3), 16, 110),
+      bias: clamp(Math.round(pct(ratios, 0.10) * 70) / 100, 0.8, 0.98),
+      softness: clamp(Math.round((pct(doms, 0.50) - pct(doms, 0.05)) * 1.6), 24, 110),
     },
   };
 }
@@ -1152,7 +1158,8 @@ export class ChromaKeyVideo extends EventTarget {
             && sat > 0.08 && dom > 2) {
           const keyed = clamp((dom - 2) / softDenominator + (sat - 0.08) * 1.8, 0, 1);
           d[i + 3] = d[i + 3] * (1 - keyed);
-        } else if (dom > 8 && key > 70) {
+          d[i + ki] = Math.max(oA, oB);
+        } else if (dom > 4 && key > 40) {
           d[i + ki] = Math.max(0, key - dom * spill);
         }
         if (rowFade !== 1) d[i + 3] *= rowFade;
