@@ -103,7 +103,7 @@ The output canvas behaves like an `<img>`: give it a CSS size (or let it default
 
 ## Auto-tune
 
-`minKey`, `bias`, and `softness` depend on the footage — how saturated the screen is, how evenly it's lit, how much the codec drifted the color. Auto-tune measures that instead of guessing: it downsamples the current frame (~9K pixels, a fraction of a millisecond), finds the key-dominant background population, and derives the three parameters from its percentiles. `spill` is left alone — it's a taste setting.
+`minKey`, `bias`, and `softness` depend on the footage — how saturated the screen is, how evenly it's lit, how much the codec drifted the color. Auto-tune measures that instead of guessing: it downsamples the current frame (~9K pixels, ~3 ms per run including the GPU readback), finds the key-dominant background population, and derives the three parameters from its percentiles. `spill` is left alone — it's a taste setting.
 
 Three ways to use it:
 
