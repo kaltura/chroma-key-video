@@ -109,9 +109,10 @@ function reflectSliders(params) {
   }
 }
 
-function addPlayer(source) {
+function addPlayer(source, extraOptions = {}) {
   const player = new ChromaKeyVideo(source, {
     ...currentOptions(),
+    ...extraOptions,
     videoAttributes: { ...DEFAULTS.videoAttributes, autoplay: true, loop: true },
   });
   player.addEventListener('backend', (e) => {
@@ -130,6 +131,13 @@ function addPlayer(source) {
 }
 
 document.getElementById('add-synthetic').onclick = () => addPlayer(makeSyntheticStream());
+
+// ?src=<video url> preloads a clip; add &tune to auto-tune on the first frame.
+const query = new URLSearchParams(location.search);
+if (query.get('src')) {
+  document.getElementById('src-url').value = query.get('src');
+  addPlayer(query.get('src'), query.has('tune') ? { autoTune: true } : {});
+}
 document.getElementById('add-url').onclick = () => {
   const url = document.getElementById('src-url').value.trim();
   if (url) addPlayer(url);
