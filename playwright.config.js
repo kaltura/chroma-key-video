@@ -23,7 +23,7 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
   },
   projects: [
-    { name: 'chromium', testMatch: /e2e\.spec\.js/ },
+    { name: 'chromium', testMatch: /(e2e|footage)\.spec\.js/ },
     // Benchmark runs on demand (npm run bench), not with the default suite.
     { name: 'bench', testMatch: /bench\.spec\.js/, timeout: 120_000 },
   ],

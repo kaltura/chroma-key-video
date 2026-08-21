@@ -198,12 +198,14 @@ Everything evergreen: Chrome/Edge, Firefox, Safari 15.4+ (including iOS). The li
 
 ```bash
 npm install
-npm test              # e2e suite (16 tests)
+npm test              # e2e + real-footage suite (20 tests)
 npm run bench         # performance benchmark -> bench-results.json
 npm run check         # syntax check + bundle size budget gate
 ```
 
 The e2e suite (Playwright, headless Chromium with SwiftShader) generates synthetic green/blue-screen test patterns via `canvas.captureStream()`, renders them through the library, and asserts output pixels: transparency, ramp alpha, spill values, WebGL↔Canvas2D parity, 12 concurrent instances, edge fades, orientation, destroy semantics, the custom element, the encoded-URL source path, plugin lifecycle and error isolation, one-shot and adaptive auto-tune (including convergence), and the `auto-tune` element attribute.
+
+The real-footage suite (`test/footage.spec.js`) runs two short 720p h264 clips of a presenter over a green screen (committed in `test/assets/`, so CI stays offline) through both backends. Real footage carries codec noise, uneven lighting, hair detail, and soft shadows the synthetic patterns can't, so its assertions are statistical: after seeking to a fixed frame and auto-tuning, the background margins are fully transparent, the face and body are fully opaque, the transparent/opaque population fractions are in range, and under 0.5% of visible pixels keep a strong green cast (measured ~0.04%).
 
 The benchmark (`test/bench.spec.js`) measures per-frame render cost (WebGL key pass, edgeDissolve, Canvas2D fallback), `autoTune()` cost, sustained fps for 1×720p and 12 concurrent players, and main-thread jank — on a synthetic 720p source, so it runs offline. It fails only on order-of-magnitude regressions (ceilings sized for SwiftShader); absolute numbers land in `bench-results.json` and, on GitHub Actions, the job summary.
 
