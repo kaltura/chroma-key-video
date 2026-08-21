@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chroma-key-video demo</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    font: 14px/1.5 system-ui, sans-serif;
+    color: #eee;
+    background:
+      repeating-conic-gradient(#2a2a3e 0% 25%, #1a1a2a 0% 50%) 0 0/48px 48px;
+    min-height: 100vh;
+  }
+  header { padding: 16px 24px; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
+  h1 { margin: 0 0 4px; font-size: 18px; }
+  header p { margin: 0; opacity: .7; }
+  #controls {
+    display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center;
+    padding: 12px 24px; background: rgba(0,0,0,.55); backdrop-filter: blur(6px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  #controls label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #controls input[type=range] { width: 110px; }
+  #controls input[type=url] { width: 260px; padding: 4px 8px; }
+  #controls output { min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+  button { padding: 5px 14px; cursor: pointer; }
+  #stage { display: flex; flex-wrap: wrap; gap: 24px; padding: 32px 24px; align-items: flex-end; }
+  #stage canvas { width: 360px; max-width: 90vw; height: auto; }
+  #backend { opacity: .6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>chroma-key-video</h1>
+  <p>Real-time green-screen keying over a live checkered page background. <span id="backend"></span></p>
+</header>
+
+<div id="controls">
+  <button id="add-synthetic">Add synthetic player</button>
+  <label><input type="url" id="src-url" placeholder="https://…/green-screen.mp4 (CORS required)">
+    <button id="add-url">Add from URL</button></label>
+  <label>minKey <input type="range" id="minKey" min="0" max="255" step="1" value="36"><output>36</output></label>
+  <label>bias <input type="range" id="bias" min="0.5" max="1.5" step="0.01" value="0.96"><output>0.96</output></label>
+  <label>softness <input type="range" id="softness" min="0" max="120" step="1" value="28"><output>28</output></label>
+  <label>spill <input type="range" id="spill" min="0" max="1.5" step="0.05" value="0.45"><output>0.45</output></label>
+  <label><input type="checkbox" id="edgeDissolve"> edge dissolve</label>
+  <button id="clear">Remove all</button>
+</div>
+
+<div id="stage"></div>
+
+<script type="module">
+import { ChromaKeyVideo, DEFAULTS } from '../src/chromakey.js';
+
+const stage = document.getElementById('stage');
+const players = [];
+
+// ── Synthetic green-screen source: an animated "presenter" bouncing on a
+//    green background, so the demo works with no video file at hand. ──────
+function makeSyntheticStream() {
+  const c = document.createElement('canvas');
+  c.width = 480; c.height = 360;
+  const ctx = c.getContext('2d');
+  let t = 0;
+  setInterval(() => {
+    t += 0.05;
+    ctx.fillStyle = 'rgb(48,205,52)';
+    ctx.fillRect(0, 0, c.width, c.height);
+    const x = c.width / 2 + Math.sin(t) * 90;
+    const y = c.height - 130 + Math.abs(Math.sin(t * 2.3)) * -30;
+    // body
+    ctx.fillStyle = '#d9622b';
+    ctx.beginPath(); ctx.ellipse(x, y + 70, 55, 62, 0, 0, Math.PI * 2); ctx.fill();
+    // head
+    ctx.fillStyle = '#f2c199';
+    ctx.beginPath(); ctx.arc(x, y, 42, 0, Math.PI * 2); ctx.fill();
+    // eyes
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(x - 14, y - 6, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 14, y - 6, 5, 0, Math.PI * 2); ctx.fill();
+    // mouth (talks)
+    ctx.beginPath(); ctx.ellipse(x, y + 16, 12, 4 + Math.abs(Math.sin(t * 7)) * 8, 0, 0, Math.PI * 2); ctx.fill();
+  }, 33);
+  return c.captureStream(30);
+}
+
+function currentOptions() {
+  return {
+    minKey: Number(document.getElementById('minKey').value),
+    bias: Number(document.getElementById('bias').value),
+    softness: Number(document.getElementById('softness').value),
+    spill: Number(document.getElementById('spill').value),
+    edgeDissolve: document.getElementById('edgeDissolve').checked,
+  };
+}
+
+function addPlayer(source) {
+  const player = new ChromaKeyVideo(source, {
+    ...currentOptions(),
+    videoAttributes: { ...DEFAULTS.videoAttributes, autoplay: true, loop: true },
+  });
+  player.addEventListener('backend', (e) => {
+    document.getElementById('backend').textContent = `backend: ${e.detail}`;
+  });
+  player.addEventListener('error', (e) => console.error('player error', e.detail));
+  player.mount(stage);
+  player.play();
+  players.push(player);
+}
+
+document.getElementById('add-synthetic').onclick = () => addPlayer(makeSyntheticStream());
+document.getElementById('add-url').onclick = () => {
+  const url = document.getElementById('src-url').value.trim();
+  if (url) addPlayer(url);
+};
+document.getElementById('clear').onclick = () => {
+  while (players.length) players.pop().destroy();
+};
+
+for (const id of ['minKey', 'bias', 'softness', 'spill']) {
+  const input = document.getElementById(id);
+  input.oninput = () => {
+    input.nextElementSibling.textContent = input.value;
+    for (const p of players) p.update({ [id]: Number(input.value) });
+  };
+}
+document.getElementById('edgeDissolve').onchange = (e) => {
+  for (const p of players) p.update({ edgeDissolve: e.target.checked });
+};
+
+addPlayer(makeSyntheticStream());
+</script>
+</body>
+</html>

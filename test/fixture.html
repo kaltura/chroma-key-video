@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chroma-key-video e2e fixture</title>
+<style>
+  body { margin: 0; background: #222; }
+  #stage canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script type="module">
+import { ChromaKeyVideo, defineChromaKeyVideoElement, DEFAULTS } from '/src/chromakey.js';
+
+window.CKV = { ChromaKeyVideo, defineChromaKeyVideoElement, DEFAULTS };
+window.players = {};
+let nextId = 1;
+
+const W = 320, H = 240;
+
+// Synthetic test pattern (default: green screen):
+// - background: key color (40,200,40) green / (40,40,200) blue
+// - vertical red stripe x 120-200, full height (foreground; crosses fade zones)
+// - red marker top-left 0-40 sq, blue marker bottom-right (y-flip canaries)
+// - partial-ramp patch rgb(171,180,158) at x 40-100, y 100-140 (expected alpha ~120)
+// - spill patch rgb(235,250,232) at x 220-280, y 100-140 (sat .072 fails key gate, dom 15 spills)
+function drawPattern(ctx, channel) {
+  ctx.fillStyle = channel === 'blue' ? 'rgb(40,40,200)' : 'rgb(40,200,40)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgb(200,40,40)';
+  ctx.fillRect(120, 0, 80, H);
+  ctx.fillRect(0, 0, 40, 40);
+  ctx.fillStyle = 'rgb(40,40,200)';
+  ctx.fillRect(280, 200, 40, 40);
+  if (channel !== 'blue') {
+    ctx.fillStyle = 'rgb(171,180,158)';
+    ctx.fillRect(40, 100, 60, 40);
+    ctx.fillStyle = 'rgb(235,250,232)';
+    ctx.fillRect(220, 100, 60, 40);
+  }
+}
+
+// captureStream only emits frames on draw commits, so keep redrawing the
+// (identical) pattern on an interval to feed the video a steady frame rate.
+function makePatternStream(channel = 'green') {
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  drawPattern(ctx, channel);
+  const stream = canvas.captureStream(30);
+  const timer = setInterval(() => drawPattern(ctx, channel), 50);
+  return { stream, canvas, timer };
+}
+
+// Create a player from a synthetic pattern stream, mount it, wait for the
+// first rendered frame, and return its handle id.
+window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeight = H } = {}) => {
+  return new Promise((resolve, reject) => {
+    const { stream, timer } = makePatternStream(channel);
+    const player = new ChromaKeyVideo(stream, {
+      maxPixelRatio: 1,
+      videoAttributes: { ...DEFAULTS.videoAttributes, autoplay: true },
+      ...options,
+    });
+    player.canvas.style.width = cssWidth + 'px';
+    player.canvas.style.height = cssHeight + 'px';
+    player.mount(document.getElementById('stage'));
+    const id = String(nextId++);
+    window.players[id] = { player, timer };
+    const timeout = setTimeout(() => reject(new Error('player never started')), 10000);
+    player.addEventListener('started', () => {
+      // Let a couple more frames land so sampling sees steady-state output.
+      setTimeout(() => { clearTimeout(timeout); resolve(id); }, 200);
+    }, { once: true });
+    player.addEventListener('error', (e) => reject(e.detail));
+    player.play().catch(() => {});
+  });
+};
+
+// Record ~1.2s of the pattern to a webm blob and return an object URL —
+// exercises the URL-source constructor path with a real encoded video.
+window.makePatternVideoURL = (channel = 'green') => {
+  return new Promise((resolve, reject) => {
+    const { stream, timer } = makePatternStream(channel);
+    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+    const chunks = [];
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = () => {
+      clearInterval(timer);
+      resolve(URL.createObjectURL(new Blob(chunks, { type: 'video/webm' })));
+    };
+    recorder.onerror = (e) => reject(e.error);
+    recorder.start();
+    setTimeout(() => recorder.stop(), 1200);
+  });
+};
+
+// Create a player directly from a source URL (webm/mp4).
+window.createPlayerFromURL = (url, options = {}) => {
+  return new Promise((resolve, reject) => {
+    const player = new ChromaKeyVideo(url, {
+      maxPixelRatio: 1,
+      videoAttributes: { ...DEFAULTS.videoAttributes, autoplay: true, loop: true },
+      ...options,
+    });
+    player.canvas.style.width = W + 'px';
+    player.canvas.style.height = H + 'px';
+    player.mount(document.getElementById('stage'));
+    const id = String(nextId++);
+    window.players[id] = { player, timer: 0 };
+    const timeout = setTimeout(() => reject(new Error('player never started')), 10000);
+    player.addEventListener('started', () => {
+      setTimeout(() => { clearTimeout(timeout); resolve(id); }, 300);
+    }, { once: true });
+    player.addEventListener('error', (e) => reject(new Error('video error: ' + (e.detail && e.detail.message))));
+    player.play().catch(() => {});
+  });
+};
+
+// Sample one pixel of a player's display canvas at fractional coordinates.
+// Returns [r, g, b, a] with straight (un-premultiplied) color values.
+window.sample = (id, xf, yf) => {
+  const { player } = window.players[id];
+  const c = player.canvas;
+  const ctx = c.getContext('2d');
+  const x = Math.min(c.width - 1, Math.round(xf * c.width));
+  const y = Math.min(c.height - 1, Math.round(yf * c.height));
+  const d = ctx.getImageData(x, y, 1, 1).data;
+  return [d[0], d[1], d[2], d[3]];
+};
+
+window.destroyPlayer = (id) => {
+  const entry = window.players[id];
+  if (entry) {
+    entry.player.destroy();
+    if (entry.timer) clearInterval(entry.timer);
+    delete window.players[id];
+  }
+};
+
+window.fixtureReady = true;
+</script>
+</body>
+</html>
