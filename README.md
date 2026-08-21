@@ -224,6 +224,32 @@ Open **[the bench page](https://kaltura.github.io/chroma-key-video/test/bench.ht
 
 Then hit **Share results**: it opens a prefilled GitHub issue with your numbers as JSON. A bot validates the submission, adds your device to **[DEVICES.md](DEVICES.md)** (the community leaderboard), and closes the issue. No account data beyond what your browser exposes (user agent, GPU renderer string, core count) is collected.
 
+### Observed numbers
+
+All rows below key a 1280x720 buffer. "Key ms" / "+Dissolve ms" / "CPU ms" are per-frame render cost; "fps x12" is the per-player range with 12 concurrent instances running at once.
+
+**Across engines**, same machine (M3 Pro, macOS), synthetic source, `npm run bench:all`:
+
+| Engine | GPU / backend | Key ms | +Dissolve ms | CPU ms | autoTune ms | fps x1 | fps x12 | Jank /120 |
+|---|---|---|---|---|---|---|---|---|
+| Firefox | Apple M1, or similar (real GPU) | 4.56 | 4.48 | 8.27 | 0.40 | 17.4 | 17.5 each | 1 |
+| WebKit | Apple GPU (real GPU) | 3.14 | 3.37 | 2.00 | 0.95 | 27.5 | 18.5-19 each | 1 |
+| Chromium (headless) | ANGLE/SwiftShader (software) | 13.6 | 32.0 | 2.21 | 0.86 | 30.4 | 20 each | 0 |
+
+Headless Chromium falls back to the SwiftShader software rasterizer with no real GPU attached, which is why its key/dissolve costs run higher than Firefox and WebKit's real-GPU numbers above despite otherwise being the fastest engine on real hardware (see the next table).
+
+**Across environments**, real hair-footage clip vs. the synthetic source, showing why CI's regression ceilings are set generously:
+
+| Environment | GPU | Key ms | +Dissolve ms | CPU ms | autoTune ms | fps x1 | fps x12 | Jank /120 |
+|---|---|---|---|---|---|---|---|---|
+| Real Chrome, real GPU (M3 Pro, footage) | ANGLE Metal, Apple M3 Pro | 1.04 | 1.59 | 5.89 | 4.05 | 24 | 24-24.5 | 0 (worst 18.6ms) |
+| Headless Chromium, SwiftShader (M3 Pro, footage) | ANGLE/SwiftShader (software) | 10.96 | 29.66 | 3.91 | 6.67 | 24 | 17.5-24.5 | 73 (worst 51.6ms) |
+| GitHub Actions hosted runner, SwiftShader (2-core, synthetic) | ANGLE/SwiftShader (software) | 61.06 | 153.48 | 5.05 | 3.20 | 9.5 | 11 each | 120 (worst 100.1ms) |
+
+A real device with real GPU access renders 10-50x faster than the weakest CI runner. That gap is why `test/bench.spec.js`'s gates are sized off the hosted-runner numbers, not the local ones — they only need to catch genuine regressions, not runner-to-runner variance.
+
+More devices, browsers, and real footage vs. synthetic comparisons accumulate in **[DEVICES.md](DEVICES.md)** as people run the [bench page](https://kaltura.github.io/chroma-key-video/test/bench.html) and share results.
+
 ## Demo
 
 Live at **[kaltura.github.io/chroma-key-video/demo](https://kaltura.github.io/chroma-key-video/demo/)**, or locally:
