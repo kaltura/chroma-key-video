@@ -18,13 +18,16 @@ import fs from 'node:fs';
 
 const SRC = process.env.BENCH_SRC || null;
 
+// Sized against GitHub's 2-core hosted runner under SwiftShader (measured:
+// key 61ms, dissolve 153ms, cpu 5ms, autoTune 3ms, fps1 9.5, fps12 11 each)
+// with ~3x headroom so only genuine regressions trip.
 const CEILINGS = {
-  webglKeyMs: 50,
-  webglDissolveMs: 80,
+  webglKeyMs: 200,
+  webglDissolveMs: 450,
   cpuKeyMs: 150,
   autoTuneMs: 60,
-  fps1: 10, // floor
-  fpsEachOf12: 5, // floor
+  fps1: 3, // floor
+  fpsEachOf12: 3, // floor
 };
 
 test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ page }, testInfo) => {

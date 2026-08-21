@@ -136,7 +136,7 @@ const hash = createHash('sha256').update(JSON.stringify({ device, runs })).diges
 const records = loadRecords();
 if (records.some((r) => r.hash === hash)) {
   writeFileSync(COMMENT_FILE,
-    'These exact results are already in [DEVICES.md](../blob/main/DEVICES.md) — ' +
+    'These exact results are already in [DEVICES.md](https://github.com/kaltura/chroma-key-video/blob/main/DEVICES.md) — ' +
     'closing as a duplicate. Thanks for benchmarking!\n');
   console.log('duplicate — nothing to ingest');
   process.exit(0);
@@ -154,5 +154,5 @@ writeFileSync(JSONL, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
 writeFileSync(DEVICES_MD, renderDevicesMd(records));
 writeFileSync(COMMENT_FILE,
   `Ingested ${runs.length} run(s) — your device is now in ` +
-  '[DEVICES.md](../blob/main/DEVICES.md). Thanks for benchmarking!\n');
+  '[DEVICES.md](https://github.com/kaltura/chroma-key-video/blob/main/DEVICES.md). Thanks for benchmarking!\n');
 console.log(`ingested issue #${issue.number}: ${runs.length} run(s), hash ${hash}`);
