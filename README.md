@@ -4,7 +4,7 @@
 [![Bundle size](https://img.shields.io/badge/minified-24KB-blue)](scripts/check-size.mjs)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Real-time green/blue-screen keying for HTML video, in the browser. Point it at any flat green-screen video (file URL, `<video>` element, or `MediaStream`) and get a per-pixel transparent canvas you can composite over anything on the page.
+Real-time green/blue-screen keying for HTML video, in the browser. Point it at any flat green-screen video — a file URL, a `<video>` element, or a `MediaStream`. Get back a per-pixel transparent canvas. Composite it over anything on the page.
 
 - **Zero dependencies.** One ES module file, no build step. Works with any framework or none.
 - **Unlimited concurrent players.** All instances share one WebGL context (browsers cap live contexts at ~8-16), each blitting to its own lightweight 2D canvas.
@@ -38,7 +38,7 @@ Or as a custom element (style-isolated via closed shadow DOM):
 <chroma-key-video src="avatar-greenscreen.mp4" autoplay loop muted edge-dissolve></chroma-key-video>
 ```
 
-The output canvas behaves like an `<img>`: give it a CSS size (or let it default to the video's aspect ratio) and position it anywhere. The render buffer follows the canvas's layout box × `devicePixelRatio`, capped by `maxPixelRatio`.
+The output canvas behaves like an `<img>`. Give it a CSS size, or let it default to the video's aspect ratio, and position it anywhere. The render buffer follows the canvas's layout box × `devicePixelRatio`, capped by `maxPixelRatio`.
 
 ## API
 
@@ -103,11 +103,21 @@ The output canvas behaves like an `<img>`: give it a CSS size (or let it default
 
 ### `<chroma-key-video>` element
 
-`defineChromaKeyVideoElement(tagName?)` registers the element. Attributes: `src`, `autoplay`, `loop`, `muted`, `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`, `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`, `fade-bottom`, `max-pixel-ratio`. Numeric attributes update live. The underlying player is exposed as `element.player`.
+`defineChromaKeyVideoElement(tagName?)` registers the element.
+
+- **Attributes:** `src`, `autoplay`, `loop`, `muted`, `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`, `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`, `fade-bottom`, `max-pixel-ratio`.
+- Numeric attributes update live.
+- The underlying player is exposed as `element.player`.
 
 ## Auto-tune
 
-`minKey`, `bias`, and `softness` depend on the footage — how saturated the screen is, how evenly it's lit, how much the codec drifted the color. Auto-tune measures that instead of guessing: it downsamples the current frame (~9K pixels, ~3 ms per run including the GPU readback), finds the key-dominant background population, and derives the three parameters from its percentiles. `spill` is left alone — it's a taste setting.
+`minKey`, `bias`, and `softness` depend on the footage: how saturated the screen is, how evenly it's lit, how much the codec drifted the color. Auto-tune measures that instead of guessing.
+
+- Downsamples the current frame (~9K pixels, ~3 ms per run including the GPU readback).
+- Finds the key-dominant background population.
+- Derives the three parameters from its percentiles.
+
+`spill` is left alone — it's a taste setting.
 
 Three ways to use it:
 
@@ -125,7 +135,13 @@ import { autoTunePlugin } from './src/chromakey.js';
 player.use(autoTunePlugin({ adaptive: true, interval: 1500, smoothing: 0.5 }));
 ```
 
-Adaptive runs blend into the current values (exponential moving average, `smoothing` = weight of the old value) and skip the update entirely when the change is below visibility thresholds — a static scene converges and then costs only the analysis, no re-renders. Every run fires an `autotune` event with the result; `{ok: false, reason}` reports `'not-ready'`, `'unreadable'` (tainted canvas), or `'no-background'` (under 2% of pixels look like a key screen — the current settings are left untouched).
+Adaptive runs blend into the current values using an exponential moving average (`smoothing` = weight of the old value). They skip the update entirely when the change is below visibility thresholds. A static scene converges, then costs only the analysis — no re-renders.
+
+Every run fires an `autotune` event with the result. `{ok: false, reason}` reports one of:
+
+- `'not-ready'`
+- `'unreadable'` — tainted canvas
+- `'no-background'` — under 2% of pixels look like a key screen; current settings are left untouched
 
 ## Plugins
 
@@ -173,9 +189,23 @@ keyed when: key is the max channel, key > minKey, key > otherA*bias,
 alpha = 1 - clamp((dom - 2) / max(8, softness*0.55) + (sat - 0.08)*1.8, 0, 1)
 ```
 
-Keyed pixels are also fully despilled — the key channel is clamped to the max of the other two — so partially keyed edge pixels composite without a green halo. Pixels that fail the gate but still carry a key cast (`dom > 4`, `key > 40`) get `dom * min(max(1, spill), spill * (1 + dom/32))` subtracted from the key channel: faint casts are reduced by the `spill` fraction (a taste setting), and the removal fraction ramps up to a full clamp as the cast grows. The ramp handles mixed hair/screen pixels — strands thin enough that a pixel is part hair, part screen — which are too dark to pass the keying gate but carry a strong cast; a constant fraction would leave them visibly green. The trade-off is standard for keyers: a genuinely green foreground object is desaturated toward its other channels.
+Keyed pixels are fully despilled: the key channel is clamped to the max of the other two. Partially keyed edge pixels then composite without a green halo.
 
-With `edgeDissolve`, the keyed layer additionally runs through a separable 9-tap Gaussian blur mixed in by a bottom-anchored vignette (with desaturation toward luma), plus explicit top/bottom alpha fade ramps and a redundant CSS mask fade.
+Pixels that fail the keying gate but still carry a key cast (`dom > 4`, `key > 40`) get partial spill removal instead:
+
+- `dom * min(max(1, spill), spill * (1 + dom/32))` is subtracted from the key channel.
+- Faint casts are reduced by the `spill` fraction — a taste setting.
+- The removal fraction ramps up to a full clamp as the cast grows.
+
+This ramp is for mixed hair/screen pixels — strands thin enough that a pixel is part hair, part screen. They're too dark to pass the keying gate but still carry a strong cast; a constant removal fraction would leave them visibly green.
+
+The trade-off is standard for keyers: a genuinely green foreground object gets desaturated toward its other channels.
+
+With `edgeDissolve`, the keyed layer also runs through:
+
+- A separable 9-tap Gaussian blur, mixed in by a bottom-anchored vignette with desaturation toward luma.
+- Explicit top/bottom alpha fade ramps.
+- A redundant CSS mask fade.
 
 ## Architecture
 
@@ -196,7 +226,7 @@ WebGL unavailable / context lost ──▶ Canvas2D fallback (identical per-pixe
 
 ## Browser support
 
-Everything evergreen: Chrome/Edge, Firefox, Safari 15.4+ (including iOS). The library needs `<canvas>`, and uses WebGL 1 when present. Devices without WebGL fall back to the CPU path automatically.
+Everything evergreen: Chrome/Edge, Firefox, Safari 15.4+ (including iOS). The library needs `<canvas>` and uses WebGL 1 when present. Devices without WebGL fall back to the CPU path automatically.
 
 ## Testing & CI
 
@@ -208,25 +238,51 @@ npm run bench:all     # benchmark on Chromium + Firefox + WebKit
 npm run check         # syntax check + bundle size budget gate
 ```
 
-The e2e suite (Playwright, headless Chromium with SwiftShader) generates synthetic green/blue-screen test patterns via `canvas.captureStream()`, renders them through the library, and asserts output pixels: transparency, ramp alpha, spill values, WebGL↔Canvas2D parity, 12 concurrent instances, edge fades, orientation, destroy semantics, the custom element, the encoded-URL source path, plugin lifecycle and error isolation, one-shot and adaptive auto-tune (including convergence), and the `auto-tune` element attribute.
+**E2E suite** (Playwright, headless Chromium with SwiftShader). Generates synthetic green/blue-screen test patterns via `canvas.captureStream()` and renders them through the library. Asserts on output pixels:
 
-The real-footage suite (`test/footage.spec.js`) runs three short 720p h264 clips of presenters over a green screen (committed in `test/assets/`, so CI stays offline) through both backends: two studio talking-head clips and a stress clip with long wind-blown hair — loose flying strands and green bounce light on the skin, the classic hard keying case (sourced from Pixabay under the Pixabay Content License). Real footage carries codec noise, uneven lighting, hair detail, and soft shadows the synthetic patterns can't, so its assertions are statistical: after seeking to a fixed frame and auto-tuning, the background margins are fully transparent, the face and body are fully opaque, the transparent/opaque population fractions are in range, and the fraction of visible pixels keeping a strong green cast stays under a per-clip ceiling (0.5% for the studio clips, 0.05% for the hair stress clip).
+- Transparency, ramp alpha, spill values.
+- WebGL↔Canvas2D parity, 12 concurrent instances, edge fades, orientation, destroy semantics.
+- The custom element and the encoded-URL source path.
+- Plugin lifecycle and error isolation.
+- One-shot and adaptive auto-tune, including convergence and the `auto-tune` element attribute.
 
-The benchmark (`test/bench.spec.js`, measurement logic in `test/bench-core.js`) measures per-frame render cost (WebGL key pass, edgeDissolve, Canvas2D fallback), `autoTune()` cost, sustained fps for 1×720p and 12 concurrent players, and main-thread jank — on a synthetic 720p source, so it runs offline. `BENCH_SRC=test/assets/greenscreen-hair.mp4 npm run bench` runs it on real footage instead. It fails only on order-of-magnitude regressions (ceilings sized for SwiftShader); absolute numbers land in `bench-results{-firefox,-webkit}{-footage}.json` and, on GitHub Actions, the job summary. `npm run bench:all` runs the same suite on Chromium, Firefox, and WebKit (one Playwright project per engine).
+**Real-footage suite** (`test/footage.spec.js`). Runs three short 720p h264 clips of presenters over a green screen, committed in `test/assets/` so CI stays offline:
 
-The size gate (`scripts/check-size.mjs`) minifies the whole library with esbuild and enforces budgets (24 KB minified, 8 KB gzip). Raising a budget is a deliberate edit in the same commit as the feature that needs it.
+- Two studio talking-head clips, plus a stress clip with long wind-blown hair — loose flying strands and green bounce light on the skin, the classic hard keying case. Sourced from Pixabay under the Pixabay Content License.
+- Both backends are exercised.
+- Real footage carries codec noise, uneven lighting, hair detail, and soft shadows the synthetic patterns can't, so assertions are statistical: after seeking to a fixed frame and auto-tuning, background margins are fully transparent, the face and body are fully opaque, transparent/opaque population fractions are in range, and the fraction of visible pixels keeping a strong green cast stays under a per-clip ceiling — 0.5% for the studio clips, 0.05% for the hair stress clip.
+
+**Benchmark** (`test/bench.spec.js`, measurement logic in `test/bench-core.js`). Runs on a synthetic 720p source by default, so it stays offline.
+
+- Measures per-frame render cost (WebGL key pass, edgeDissolve, Canvas2D fallback), `autoTune()` cost, sustained fps for 1×720p and 12 concurrent players, and main-thread jank.
+- `BENCH_SRC=test/assets/greenscreen-hair.mp4 npm run bench` runs it on real footage instead.
+- Fails only on order-of-magnitude regressions — ceilings are sized for SwiftShader.
+- Absolute numbers land in `bench-results{-firefox,-webkit}{-footage}.json` and, on GitHub Actions, the job summary.
+- `npm run bench:all` runs the same suite on Chromium, Firefox, and WebKit — one Playwright project per engine.
+
+**Size gate** (`scripts/check-size.mjs`). Minifies the whole library with esbuild and enforces budgets: 24 KB minified, 8 KB gzip. Raising a budget is a deliberate edit in the same commit as the feature that needs it.
 
 `.github/workflows/ci.yml` runs all of the above on every push and PR: syntax check → size gate → e2e tests → benchmark (results uploaded as an artifact).
 
 ## Benchmark your device
 
-Open **[the bench page](https://kaltura.github.io/chroma-key-video/test/bench.html)** on any device — phone, tablet, laptop — and hit *Run benchmark*. It runs the exact same measurement suite as CI (synthetic pattern and/or the real hair footage) and shows the results in ~30 seconds per source.
+Open **[the bench page](https://kaltura.github.io/chroma-key-video/test/bench.html)** on any device — phone, tablet, laptop. Hit *Run benchmark*.
 
-Then hit **Share results**: it opens a prefilled GitHub issue with your numbers as JSON. A bot validates the submission, adds your device to **[DEVICES.md](DEVICES.md)** (the community leaderboard), and closes the issue. No account data beyond what your browser exposes (user agent, GPU renderer string, core count) is collected.
+- Runs the exact same measurement suite as CI: synthetic pattern and/or the real hair footage.
+- Takes ~30 seconds per source.
+
+Then hit **Share results**. This opens a prefilled GitHub issue with your numbers as JSON.
+
+- A bot validates the submission and adds your device to **[DEVICES.md](DEVICES.md)**, the community leaderboard.
+- The issue closes automatically.
+- No account data beyond what your browser exposes — user agent, GPU renderer string, core count — is collected.
 
 ### Observed numbers
 
-All rows below key a 1280x720 buffer. "Key ms" / "+Dissolve ms" / "CPU ms" are per-frame render cost; "fps x12" is the per-player range with 12 concurrent instances running at once.
+All rows below key a 1280x720 buffer.
+
+- "Key ms" / "+Dissolve ms" / "CPU ms" are per-frame render cost.
+- "fps x12" is the per-player range with 12 concurrent instances running at once.
 
 **Across engines**, same machine (M3 Pro, macOS), synthetic source, `npm run bench:all`:
 
@@ -236,7 +292,7 @@ All rows below key a 1280x720 buffer. "Key ms" / "+Dissolve ms" / "CPU ms" are p
 | WebKit | Apple GPU (real GPU) | 3.14 | 3.37 | 2.00 | 0.95 | 27.5 | 18.5-19 each | 1 |
 | Chromium (headless) | ANGLE/SwiftShader (software) | 13.6 | 32.0 | 2.21 | 0.86 | 30.4 | 20 each | 0 |
 
-Headless Chromium falls back to the SwiftShader software rasterizer with no real GPU attached, which is why its key/dissolve costs run higher than Firefox and WebKit's real-GPU numbers above despite otherwise being the fastest engine on real hardware (see the next table).
+Headless Chromium has no real GPU attached — it falls back to the SwiftShader software rasterizer. That's why its key/dissolve costs run higher than Firefox and WebKit's real-GPU numbers above. On real hardware, Chromium is otherwise the fastest engine (see the next table).
 
 **Across environments**, real hair-footage clip vs. the synthetic source, showing why CI's regression ceilings are set generously:
 
@@ -246,7 +302,7 @@ Headless Chromium falls back to the SwiftShader software rasterizer with no real
 | Headless Chromium, SwiftShader (M3 Pro, footage) | ANGLE/SwiftShader (software) | 10.96 | 29.66 | 3.91 | 6.67 | 24 | 17.5-24.5 | 73 (worst 51.6ms) |
 | GitHub Actions hosted runner, SwiftShader (2-core, synthetic) | ANGLE/SwiftShader (software) | 61.06 | 153.48 | 5.05 | 3.20 | 9.5 | 11 each | 120 (worst 100.1ms) |
 
-A real device with real GPU access renders 10-50x faster than the weakest CI runner. That gap is why `test/bench.spec.js`'s gates are sized off the hosted-runner numbers, not the local ones — they only need to catch genuine regressions, not runner-to-runner variance.
+A real device with real GPU access renders 10-50x faster than the weakest CI runner. That's why `test/bench.spec.js`'s gates are sized off the hosted-runner numbers, not the local ones. They only need to catch genuine regressions, not runner-to-runner variance.
 
 More devices, browsers, and real footage vs. synthetic comparisons accumulate in **[DEVICES.md](DEVICES.md)** as people run the [bench page](https://kaltura.github.io/chroma-key-video/test/bench.html) and share results.
 
@@ -259,7 +315,12 @@ npm run serve
 # open http://localhost:4173/demo/
 ```
 
-The demo includes an animated synthetic green-screen presenter, live tuning sliders, an edge-dissolve toggle, an Auto-tune button with an adaptive checkbox (the sliders follow the derived values), and a URL input for your own footage.
+The demo includes:
+
+- An animated synthetic green-screen presenter.
+- Live tuning sliders and an edge-dissolve toggle.
+- An Auto-tune button with an adaptive checkbox — the sliders follow the derived values.
+- A URL input for your own footage.
 
 ## License
 
