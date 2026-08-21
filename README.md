@@ -1,5 +1,9 @@
 # chroma-key-video
 
+[![CI](https://github.com/kaltura/chroma-key-video/actions/workflows/ci.yml/badge.svg)](https://github.com/kaltura/chroma-key-video/actions/workflows/ci.yml)
+[![Bundle size](https://img.shields.io/badge/minified-24KB-blue)](scripts/check-size.mjs)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Real-time green/blue-screen keying for HTML video, in the browser. Point it at any flat green-screen video (file URL, `<video>` element, or `MediaStream`) and get a per-pixel transparent canvas you can composite over anything on the page.
 
 - **Zero dependencies.** One ES module file, no build step. Works with any framework or none.
