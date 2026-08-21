@@ -47,7 +47,7 @@
 
 /**
  * Default options. All are live-updatable via {@link ChromaKeyVideo#update}
- * except `channel`, `forceCanvas2D` and `videoAttributes`.
+ * except `channel`, `forceCanvas2D`, `videoAttributes` and `autoTune`.
  *
  * Keying thresholds operate on the 0-255 RGB scale.
  */
@@ -62,6 +62,12 @@ export const DEFAULTS = Object.freeze({
   softness: 28,
   /** Spill suppression strength (0-1+). Removes key-color cast from edge pixels. */
   spill: 0.45,
+  /**
+   * Derive minKey/bias/softness from the footage itself: `true` tunes once
+   * on the first frame, `'adaptive'` keeps re-tuning during playback (see
+   * {@link autoTunePlugin}). `false` uses the configured values as-is.
+   */
+  autoTune: false,
 
   /** Enable the blur + vignette + fade pipeline that dissolves frame edges. */
   edgeDissolve: false,
@@ -82,7 +88,6 @@ export const DEFAULTS = Object.freeze({
   forceCanvas2D: false,
   /** Pixel budget for the CPU fallback; frames are processed downscaled to fit. */
   maxCPUPixels: 512 * 512,
-  /** Keep rendering the last decoded frame while the video is paused. */
 
   /** Attributes applied to the <video> element created when `source` is a URL. */
   videoAttributes: Object.freeze({
@@ -94,8 +99,8 @@ export const DEFAULTS = Object.freeze({
   }),
 });
 
-/** Options that select shader variants / backends and can't change after construction. */
-const IMMUTABLE_OPTIONS = ['channel', 'forceCanvas2D', 'videoAttributes'];
+/** Options that select shader variants / backends / plugins and can't change after construction. */
+const IMMUTABLE_OPTIONS = ['channel', 'forceCanvas2D', 'videoAttributes', 'autoTune'];
 
 function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
@@ -249,6 +254,72 @@ const CHANNEL_OFFSETS = {
   green: [1, 0, 2],
   blue: [2, 0, 1],
 };
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Auto-tune parameter derivation
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Estimate keying parameters from one downscaled frame.
+ *
+ * Pixels pass a LOOSE background gate, independent of the current options
+ * (key is the max channel, sat > 0.06, dom > 4, key > 30). Percentiles over
+ * the candidates then set the thresholds with safety margin:
+ *
+ * - `minKey`: 60% of the 5th-percentile candidate key value — comfortably
+ *   below the dimmest backdrop pixel, above typical foreground key levels.
+ * - `bias`: 80% of the 10th-percentile key/other ratio, capped at 1.02 so
+ *   near-neutral edge pixels keep partially keying.
+ * - `softness`: scaled dominance spread — noisy or unevenly lit backdrops
+ *   get a wider alpha ramp.
+ *
+ * `spill` is aesthetic and left untouched.
+ *
+ * @returns {{ok: true, params: {minKey: number, bias: number, softness: number},
+ *   backgroundFraction: number} | {ok: false, reason: 'no-background',
+ *   backgroundFraction: number}}
+ */
+function deriveKeyParams(image, channel) {
+  const d = image.data;
+  const [ki, ai, bi] = CHANNEL_OFFSETS[channel];
+  const keys = [];
+  const doms = [];
+  const ratios = [];
+
+  for (let i = 0; i < d.length; i += 4) {
+    const key = d[i + ki];
+    const oA = d[i + ai];
+    const oB = d[i + bi];
+    const other = Math.max(oA, oB);
+    if (key < other || key <= 30) continue;
+    const sat = (key - Math.min(key, oA, oB)) / key;
+    const dom = key - other;
+    if (sat <= 0.06 || dom <= 4) continue;
+    keys.push(key);
+    doms.push(dom);
+    ratios.push(key / Math.max(other, 1));
+  }
+
+  const backgroundFraction = keys.length / (d.length / 4);
+  if (backgroundFraction < 0.02) {
+    return { ok: false, reason: 'no-background', backgroundFraction };
+  }
+
+  const pct = (arr, q) => arr[Math.floor(q * (arr.length - 1))];
+  keys.sort((x, y) => x - y);
+  doms.sort((x, y) => x - y);
+  ratios.sort((x, y) => x - y);
+
+  return {
+    ok: true,
+    backgroundFraction,
+    params: {
+      minKey: clamp(Math.round(pct(keys, 0.05) * 0.6), 16, 110),
+      bias: clamp(Math.round(pct(ratios, 0.10) * 80) / 100, 0.85, 1.02),
+      softness: clamp(Math.round((pct(doms, 0.50) - pct(doms, 0.05)) * 1.2), 12, 90),
+    },
+  };
+}
 
 /* ════════════════════════════════════════════════════════════════════════
  * Shared WebGL engine
@@ -529,6 +600,9 @@ function getSharedEngine() {
  *   backend is decided (first frame) or changes (context loss).
  * - `'started'` — fired once, after the first frame has been rendered.
  * - `'error'`  — detail: the underlying error (e.g. video load failure).
+ * - `'autotune'` — detail: the result object of every {@link autoTune} run.
+ * - `'pluginerror'` — detail: `{ plugin, error }`, fired when a plugin hook
+ *   throws (the plugin is detached; the player keeps running).
  */
 export class ChromaKeyVideo extends EventTarget {
   /**
@@ -556,6 +630,10 @@ export class ChromaKeyVideo extends EventTarget {
     this._started = false;
     /** Number of frames rendered so far. Useful for tests and diagnostics. */
     this.frameCount = 0;
+
+    /** Attached plugins: name -> { plugin, ctx, timers, listeners }. */
+    this._plugins = new Map();
+    this._sampleCanvas = null;     // sampleFrame()/autoTune() scratch canvas
 
     this.video = this._resolveSource(source);
 
@@ -591,6 +669,10 @@ export class ChromaKeyVideo extends EventTarget {
     if (this.video.readyState >= 2) this.renderFrame();
 
     this._startLoop();
+
+    if (this.options.autoTune) {
+      this.use(autoTunePlugin({ adaptive: this.options.autoTune === 'adaptive' }));
+    }
   }
 
   /** True when WebGL is available in this browser/environment. */
@@ -617,8 +699,8 @@ export class ChromaKeyVideo extends EventTarget {
 
   /**
    * Update keying/pipeline options live. Takes effect on the next rendered
-   * frame (immediately if the video is paused). `channel`, `forceCanvas2D`
-   * and `videoAttributes` are fixed at construction and are ignored here.
+   * frame (immediately if the video is paused). `channel`, `forceCanvas2D`,
+   * `videoAttributes` and `autoTune` are fixed at construction.
    */
   update(partial) {
     for (const key of IMMUTABLE_OPTIONS) {
@@ -659,6 +741,142 @@ export class ChromaKeyVideo extends EventTarget {
       this._started = true;
       this.dispatchEvent(new CustomEvent('started'));
     }
+
+    if (this._plugins.size) {
+      const info = {
+        frameCount: this.frameCount,
+        backend: this._backend,
+        width: this._renderWidth,
+        height: this._renderHeight,
+      };
+      for (const entry of this._plugins.values()) {
+        if (entry.plugin.frame) this._runHook(entry, entry.plugin.frame, info);
+      }
+    }
+  }
+
+  /**
+   * Attach a plugin: `{name, attach?(ctx), frame?(ctx, info), detach?(ctx)}`.
+   *
+   * Plugins see the player only through a context facade (options copy,
+   * `update`, `autoTune`, `sampleFrame`, managed timers/listeners, events)
+   * — never the render internals, so a plugin can't corrupt the pipeline.
+   * Every hook runs in a try/catch: a throwing plugin is detached and
+   * disabled while the player keeps rendering, and a `'pluginerror'` event
+   * reports it (`detail: {plugin, error}`).
+   *
+   * The `frame` hook receives `{frameCount, backend, width, height}` after
+   * each rendered frame. With no plugins attached the render loop pays
+   * nothing for the plugin system.
+   *
+   * @returns {this}
+   */
+  use(plugin) {
+    if (!plugin || typeof plugin.name !== 'string' || !plugin.name) {
+      throw new Error('chroma-key-video: a plugin needs a string "name"');
+    }
+    if (this._destroyed) {
+      throw new Error('chroma-key-video: player is destroyed');
+    }
+    if (this._plugins.has(plugin.name)) {
+      throw new Error(`chroma-key-video: plugin "${plugin.name}" is already attached`);
+    }
+    const entry = { plugin, timers: new Set(), listeners: [] };
+    entry.ctx = this._createPluginContext(entry);
+    this._plugins.set(plugin.name, entry);
+    if (plugin.attach) this._runHook(entry, plugin.attach);
+    return this;
+  }
+
+  /**
+   * Detach a plugin by name: its `detach` hook runs, and all timers and
+   * listeners it created through the context are cleaned up.
+   *
+   * @returns {boolean} false when no plugin with that name is attached.
+   */
+  unuse(name) {
+    const entry = this._plugins.get(name);
+    if (!entry) return false;
+    this._removePlugin(entry);
+    return true;
+  }
+
+  /**
+   * Read one downscaled RGBA frame of the source video. Plugin/diagnostic
+   * API — also feeds {@link autoTune}. Uses a small dedicated 2D canvas so
+   * the GL pipeline is never stalled by a pixel readback.
+   *
+   * @param {{maxPixels?: number}} [opts] — pixel budget for the sample
+   *   (default 128×72 ≈ 9k pixels). The sample keeps the video's aspect
+   *   ratio within the budget.
+   * @returns {ImageData|null} null before the first decodable frame, or
+   *   when the video is cross-origin without CORS (tainted canvas).
+   */
+  sampleFrame({ maxPixels = 128 * 72 } = {}) {
+    const video = this.video;
+    if (this._destroyed || video.readyState < 2 || !video.videoWidth) return null;
+    const scale = Math.min(1, Math.sqrt(maxPixels / (video.videoWidth * video.videoHeight)));
+    const w = Math.max(1, Math.round(video.videoWidth * scale));
+    const h = Math.max(1, Math.round(video.videoHeight * scale));
+    if (!this._sampleCanvas) {
+      this._sampleCanvas = document.createElement('canvas');
+      this._sampleCtx = this._sampleCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    if (this._sampleCanvas.width !== w || this._sampleCanvas.height !== h) {
+      this._sampleCanvas.width = w;
+      this._sampleCanvas.height = h;
+    }
+    this._sampleCtx.drawImage(video, 0, 0, w, h);
+    try {
+      return this._sampleCtx.getImageData(0, 0, w, h);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Measure the current frame and fit `minKey`/`bias`/`softness` to the
+   * footage (`spill` stays as configured). Synchronous and cheap (~1ms):
+   * samples a ~9k-pixel downscale and derives thresholds from candidate
+   * percentiles — see the module-level derivation notes.
+   *
+   * Fires an `'autotune'` event with the result as `detail`, then returns
+   * it: `{ok: true, params, backgroundFraction, applied}` on success, or
+   * `{ok: false, reason: 'not-ready' | 'unreadable' | 'no-background'}`.
+   *
+   * @param {{apply?: boolean, smoothing?: number, maxPixels?: number}} [opts]
+   *   - `apply`: write the derived params via `update()` (default true).
+   *   - `smoothing`: 0-1 blend toward the current values (0 jumps straight
+   *     to the measurement; the adaptive plugin passes 0.5 for stability).
+   *   - `maxPixels`: sample budget, see {@link sampleFrame}.
+   */
+  autoTune({ apply = true, smoothing = 0, maxPixels = 128 * 72 } = {}) {
+    const image = this.sampleFrame({ maxPixels });
+    let result;
+    if (!image) {
+      result = { ok: false, reason: this.video.readyState < 2 || !this.video.videoWidth ? 'not-ready' : 'unreadable' };
+    } else {
+      result = deriveKeyParams(image, this.options.channel);
+    }
+
+    if (result.ok && apply) {
+      const o = this.options;
+      const p = { ...result.params };
+      if (smoothing > 0) {
+        p.minKey = Math.round(o.minKey * smoothing + p.minKey * (1 - smoothing));
+        p.bias = Math.round((o.bias * smoothing + p.bias * (1 - smoothing)) * 100) / 100;
+        p.softness = Math.round(o.softness * smoothing + p.softness * (1 - smoothing));
+      }
+      // Skip no-op updates so the adaptive plugin idles once converged.
+      const changed = Math.abs(p.minKey - o.minKey) >= 2
+        || Math.abs(p.bias - o.bias) >= 0.01
+        || Math.abs(p.softness - o.softness) >= 2;
+      if (changed) this.update(p);
+      result = { ...result, params: p, applied: changed };
+    }
+
+    this.dispatchEvent(new CustomEvent('autotune', { detail: result }));
+    return result;
   }
 
   /**
@@ -673,6 +891,8 @@ export class ChromaKeyVideo extends EventTarget {
   destroy({ removeCanvas = true } = {}) {
     if (this._destroyed) return;
     this._destroyed = true;
+
+    for (const entry of [...this._plugins.values()]) this._removePlugin(entry);
 
     if (this._rvfcHandle && this.video.cancelVideoFrameCallback) {
       this.video.cancelVideoFrameCallback(this._rvfcHandle);
@@ -702,6 +922,70 @@ export class ChromaKeyVideo extends EventTarget {
   }
 
   /* ── internals ──────────────────────────────────────────────────────── */
+
+  /** Build the isolation facade one plugin sees. */
+  _createPluginContext(entry) {
+    const self = this;
+    return Object.freeze({
+      /** The source <video> (read playback state; controlling playback is fine). */
+      get video() { return self.video; },
+      /** The output canvas (read/measure; the render pipeline owns its pixels). */
+      get canvas() { return self.canvas; },
+      get backend() { return self._backend; },
+      get isDestroyed() { return self._destroyed; },
+      /** Copy of the current options — change them via update(). */
+      getOptions: () => ({ ...self.options }),
+      update: (partial) => { self.update(partial); },
+      autoTune: (opts) => self.autoTune(opts),
+      sampleFrame: (opts) => self.sampleFrame(opts),
+      requestRender: () => { self.renderFrame(); },
+      /** Managed interval, auto-cleared on detach/destroy. Returns a cancel fn. */
+      every(ms, fn) {
+        const id = setInterval(() => {
+          if (self._destroyed) { clearInterval(id); return; }
+          try { fn(); } catch (err) { self._removePlugin(entry, err); }
+        }, ms);
+        entry.timers.add(id);
+        return () => { clearInterval(id); entry.timers.delete(id); };
+      },
+      /** Managed player-event listener, auto-removed on detach/destroy. Returns an off fn. */
+      on(type, fn, opts) {
+        self.addEventListener(type, fn, opts);
+        entry.listeners.push([type, fn]);
+        return () => self.removeEventListener(type, fn);
+      },
+      /** Dispatch a CustomEvent on the player (namespace your own event types). */
+      emit(type, detail) {
+        self.dispatchEvent(new CustomEvent(type, { detail }));
+      },
+    });
+  }
+
+  /** Run a plugin hook; a throw disables the plugin instead of breaking the player. */
+  _runHook(entry, hook, info) {
+    try {
+      hook.call(entry.plugin, entry.ctx, info);
+    } catch (err) {
+      this._removePlugin(entry, err);
+    }
+  }
+
+  /** Detach a plugin: clear its timers/listeners, run detach, report a hook error if any. */
+  _removePlugin(entry, error) {
+    this._plugins.delete(entry.plugin.name);
+    for (const id of entry.timers) clearInterval(id);
+    entry.timers.clear();
+    for (const [type, fn] of entry.listeners) this.removeEventListener(type, fn);
+    entry.listeners.length = 0;
+    if (entry.plugin.detach) {
+      try { entry.plugin.detach(entry.ctx); } catch { /* already detaching */ }
+    }
+    if (error) {
+      this.dispatchEvent(new CustomEvent('pluginerror', {
+        detail: { plugin: entry.plugin.name, error },
+      }));
+    }
+  }
 
   _resolveSource(source) {
     if (typeof HTMLVideoElement !== 'undefined' && source instanceof HTMLVideoElement) {
@@ -926,6 +1210,53 @@ export class ChromaKeyVideo extends EventTarget {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+ * Built-in plugins
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Plugin that fits `minKey`/`bias`/`softness` to the footage. This is what
+ * the `autoTune` constructor option attaches; use it directly for control
+ * over the interval, smoothing, and sample budget.
+ *
+ * Tunes once as soon as a frame is available. With `adaptive: true` it keeps
+ * re-tuning every `interval` ms while the video plays, blending each result
+ * into the current options by `smoothing` so lighting changes are followed
+ * without visible parameter jumps.
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.adaptive=false] — keep re-tuning during playback.
+ * @param {number} [options.interval=1500] — ms between adaptive runs.
+ * @param {number} [options.smoothing=0.5] — EMA weight of the previous values
+ *   for adaptive runs (0 = jump straight to each new result).
+ * @param {number} [options.maxPixels=9216] — analysis budget per run.
+ * @returns a plugin for {@link ChromaKeyVideo#use}
+ */
+export function autoTunePlugin({
+  adaptive = false,
+  interval = 1500,
+  smoothing = 0.5,
+  maxPixels = 128 * 72,
+} = {}) {
+  return {
+    name: 'autoTune',
+    attach(ctx) {
+      if (ctx.video.readyState >= 2) {
+        ctx.autoTune({ maxPixels });
+      } else {
+        ctx.on('started', () => ctx.autoTune({ maxPixels }), { once: true });
+      }
+      if (adaptive) {
+        ctx.every(interval, () => {
+          if (!ctx.video.paused && !ctx.video.ended) {
+            ctx.autoTune({ maxPixels, smoothing });
+          }
+        });
+      }
+    },
+  };
+}
+
+/* ════════════════════════════════════════════════════════════════════════
  * <chroma-key-video> custom element
  *
  * A closed-shadow-DOM wrapper around ChromaKeyVideo: style-isolated from
@@ -941,6 +1272,7 @@ const ELEMENT_OPTION_ATTRIBUTES = {
   'softness': ['softness', Number],
   'spill': ['spill', Number],
   'edge-dissolve': ['edgeDissolve', (v) => v !== null && v !== 'false'],
+  'auto-tune': ['autoTune', (v) => (v === 'adaptive' ? 'adaptive' : true)],
   'fade-top': ['fadeTop', Number],
   'fade-bottom': ['fadeBottom', Number],
   'max-pixel-ratio': ['maxPixelRatio', Number],
@@ -951,7 +1283,8 @@ const ELEMENT_OPTION_ATTRIBUTES = {
  *
  * Supported attributes: `src` (required), `autoplay`, `loop`, `muted`,
  * `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`,
- * `fade-top`, `fade-bottom`, `max-pixel-ratio`.
+ * `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`,
+ * `fade-bottom`, `max-pixel-ratio`.
  *
  * The underlying player is exposed as the element's `.player` property for
  * full programmatic control (events, `update()`, the video element, etc.).
@@ -990,8 +1323,8 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
       const mapping = ELEMENT_OPTION_ATTRIBUTES[name];
       if (mapping && this._player) {
         const [key, parse] = mapping;
-        // channel is construction-only: rebuild the player for it.
-        if (key === 'channel') {
+        // Construction-only options rebuild the player.
+        if (key === 'channel' || key === 'autoTune') {
           this._teardown();
           this._build();
         } else {

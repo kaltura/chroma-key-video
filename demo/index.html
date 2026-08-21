@@ -47,13 +47,15 @@
   <label>softness <input type="range" id="softness" min="0" max="120" step="1" value="28"><output>28</output></label>
   <label>spill <input type="range" id="spill" min="0" max="1.5" step="0.05" value="0.45"><output>0.45</output></label>
   <label><input type="checkbox" id="edgeDissolve"> edge dissolve</label>
+  <button id="auto-tune">Auto-tune</button>
+  <label><input type="checkbox" id="adaptive"> adaptive</label>
   <button id="clear">Remove all</button>
 </div>
 
 <div id="stage"></div>
 
 <script type="module">
-import { ChromaKeyVideo, DEFAULTS } from '../src/chromakey.js';
+import { ChromaKeyVideo, autoTunePlugin, DEFAULTS } from '../src/chromakey.js';
 
 const stage = document.getElementById('stage');
 const players = [];
@@ -97,6 +99,16 @@ function currentOptions() {
   };
 }
 
+// Push auto-tuned values back into the sliders so they show the live params.
+function reflectSliders(params) {
+  for (const [key, value] of Object.entries(params)) {
+    const input = document.getElementById(key);
+    if (!input) continue;
+    input.value = value;
+    input.nextElementSibling.textContent = value;
+  }
+}
+
 function addPlayer(source) {
   const player = new ChromaKeyVideo(source, {
     ...currentOptions(),
@@ -106,6 +118,12 @@ function addPlayer(source) {
     document.getElementById('backend').textContent = `backend: ${e.detail}`;
   });
   player.addEventListener('error', (e) => console.error('player error', e.detail));
+  player.addEventListener('autotune', (e) => {
+    if (e.detail.ok && e.detail.applied) reflectSliders(e.detail.params);
+  });
+  if (document.getElementById('adaptive').checked) {
+    player.use(autoTunePlugin({ adaptive: true }));
+  }
   player.mount(stage);
   player.play();
   players.push(player);
@@ -118,6 +136,15 @@ document.getElementById('add-url').onclick = () => {
 };
 document.getElementById('clear').onclick = () => {
   while (players.length) players.pop().destroy();
+};
+document.getElementById('auto-tune').onclick = () => {
+  for (const p of players) p.autoTune();
+};
+document.getElementById('adaptive').onchange = (e) => {
+  for (const p of players) {
+    p.unuse('autoTune');
+    if (e.target.checked) p.use(autoTunePlugin({ adaptive: true }));
+  }
 };
 
 for (const id of ['minKey', 'bias', 'softness', 'spill']) {

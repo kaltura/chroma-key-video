@@ -239,4 +239,142 @@ test.describe('chroma-key-video', () => {
     expect(result.fg[3]).toBeGreaterThan(220);
     expect(result.fg[0]).toBeGreaterThan(150);
   });
+
+  test('plugin API: lifecycle hooks, managed timers, error isolation', async ({ page }) => {
+    const id = await create(page);
+
+    const result = await page.evaluate(async (pid) => {
+      const { player } = window.players[pid];
+      const calls = { attach: 0, frames: 0, ticks: 0, detach: 0, lastInfo: null };
+      const errors = [];
+      player.addEventListener('pluginerror', (e) => errors.push(e.detail.plugin));
+
+      player.use({
+        name: 'probe',
+        attach(ctx) { calls.attach++; ctx.every(50, () => calls.ticks++); },
+        frame(ctx, info) { calls.frames++; calls.lastInfo = info; },
+        detach() { calls.detach++; },
+      });
+      // A plugin whose frame hook throws must be detached without affecting
+      // the player or the probe plugin.
+      player.use({ name: 'bomb', frame() { throw new Error('boom'); } });
+
+      await new Promise((r) => setTimeout(r, 400));
+      const framesWithBoth = calls.frames;
+      const ticksSoFar = calls.ticks;
+
+      const unusedProbe = player.unuse('probe');
+      const unusedBomb = player.unuse('bomb'); // already auto-removed
+      await new Promise((r) => setTimeout(r, 200));
+
+      return {
+        ...calls,
+        framesWithBoth,
+        ticksSoFar,
+        framesAfterDetach: calls.frames - framesWithBoth,
+        ticksAfterDetach: calls.ticks - ticksSoFar,
+        unusedProbe,
+        unusedBomb,
+        errors,
+        playerFrames: player.frameCount,
+      };
+    }, id);
+
+    expect(result.attach).toBe(1);
+    expect(result.detach).toBe(1);
+    expect(result.framesWithBoth).toBeGreaterThan(3);
+    expect(result.ticksSoFar).toBeGreaterThan(2);
+    expect(result.framesAfterDetach).toBe(0);
+    expect(result.ticksAfterDetach).toBe(0);
+    expect(result.unusedProbe).toBe(true);
+    expect(result.unusedBomb).toBe(false);
+    expect(result.errors).toEqual(['bomb']);
+    expect(result.playerFrames).toBeGreaterThan(10); // bomb never broke the loop
+    expect(result.lastInfo.backend).toBe('webgl');
+    expect(result.lastInfo.width).toBeGreaterThan(0);
+  });
+
+  test('autoTune() derives keying params from the footage', async ({ page }) => {
+    // minKey 240 defeats keying: the background renders opaque.
+    const id = await create(page, { minKey: 240 });
+    const before = await sample(page, id, SAMPLES.background);
+    expect(before[3]).toBe(255);
+
+    const result = await page.evaluate((pid) => window.players[pid].player.autoTune(), id);
+    expect(result.ok).toBe(true);
+    expect(result.applied).toBe(true);
+    expect(result.backgroundFraction).toBeGreaterThan(0.3);
+    expect(result.params.minKey).toBeGreaterThanOrEqual(16);
+    expect(result.params.minKey).toBeLessThan(150);
+
+    await page.waitForTimeout(150);
+    const bg = await sample(page, id, SAMPLES.background);
+    expect(bg[3]).toBeLessThanOrEqual(2);
+    const fg = await sample(page, id, SAMPLES.stripe);
+    expect(fg[3]).toBe(255);
+  });
+
+  test('autoTune option tunes on the first frame; adaptive re-tunes and converges', async ({ page }) => {
+    // autoTune: true overrides the hopeless manual minKey automatically.
+    const once = await create(page, { minKey: 240, autoTune: true });
+    const bg = await sample(page, once, SAMPLES.background);
+    expect(bg[3]).toBeLessThanOrEqual(2);
+    const fg = await sample(page, once, SAMPLES.stripe);
+    expect(fg[3]).toBe(255);
+    const tunedMinKey = await page.evaluate(
+      (pid) => window.players[pid].player.options.minKey, once);
+    expect(tunedMinKey).toBeLessThan(150);
+
+    // Adaptive: repeated runs on a static pattern converge to applied: false.
+    const adaptive = await create(page, { minKey: 240 });
+    const events = await page.evaluate(async (pid) => {
+      const { player } = window.players[pid];
+      const seen = [];
+      player.addEventListener('autotune', (e) => seen.push(e.detail));
+      player.use(window.CKV.autoTunePlugin({ adaptive: true, interval: 150 }));
+      await new Promise((r) => setTimeout(r, 650));
+      player.unuse('autoTune');
+      return seen;
+    }, adaptive);
+
+    expect(events.length).toBeGreaterThanOrEqual(3);
+    expect(events.every((e) => e.ok)).toBe(true);
+    expect(events[0].applied).toBe(true);
+    expect(events[events.length - 1].applied).toBe(false);
+    const bg2 = await sample(page, adaptive, SAMPLES.background);
+    expect(bg2[3]).toBeLessThanOrEqual(2);
+  });
+
+  test('custom element: auto-tune attribute overrides bad manual params', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      window.CKV.defineChromaKeyVideoElement();
+      const url = await window.makePatternVideoURL();
+      const el = document.createElement('chroma-key-video');
+      el.setAttribute('src', url);
+      el.setAttribute('autoplay', '');
+      el.setAttribute('loop', '');
+      el.setAttribute('muted', '');
+      el.setAttribute('min-key', '240');
+      el.setAttribute('auto-tune', '');
+      el.style.width = '320px';
+      document.body.appendChild(el);
+
+      const player = el.player;
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('element player never started')), 10000);
+        player.addEventListener('started', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      const c = player.canvas;
+      const ctx = c.getContext('2d');
+      const px = (xf, yf) => Array.from(ctx.getImageData(
+        Math.round(xf * (c.width - 1)), Math.round(yf * (c.height - 1)), 1, 1).data);
+      return { minKey: player.options.minKey, bg: px(0.06, 0.6), fg: px(0.5, 0.5) };
+    });
+
+    expect(result.minKey).toBeLessThan(150);
+    expect(result.bg[3]).toBeLessThanOrEqual(30);
+    expect(result.fg[3]).toBeGreaterThan(220);
+  });
 });

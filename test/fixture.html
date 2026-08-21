@@ -11,9 +11,9 @@
 <body>
 <div id="stage"></div>
 <script type="module">
-import { ChromaKeyVideo, defineChromaKeyVideoElement, DEFAULTS } from '/src/chromakey.js';
+import { ChromaKeyVideo, defineChromaKeyVideoElement, autoTunePlugin, DEFAULTS } from '/src/chromakey.js';
 
-window.CKV = { ChromaKeyVideo, defineChromaKeyVideoElement, DEFAULTS };
+window.CKV = { ChromaKeyVideo, defineChromaKeyVideoElement, autoTunePlugin, DEFAULTS };
 window.players = {};
 let nextId = 1;
 

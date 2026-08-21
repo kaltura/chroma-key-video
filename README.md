@@ -7,6 +7,7 @@ Real-time green/blue-screen keying for HTML video, in the browser. Point it at a
 - **Robust keying.** Dominant-channel classification with a continuous alpha ramp and spill suppression — no exact key color needed, survives codec color drift, removes green fringe from hair and edges.
 - **Works everywhere.** WebGL with an automatic Canvas2D (CPU) fallback running the identical math, plus WebGL context-loss recovery.
 - **Optional edge dissolve.** Blur + bottom vignette + top/bottom alpha fades that make a keyed presenter read as part of the page instead of a video rectangle.
+- **Auto-tune.** Derives `minKey`/`bias`/`softness` from the footage itself — once on the first frame or continuously as lighting changes — via a tiny sandboxed plugin system you can extend.
 
 ## Quick start
 
@@ -54,6 +55,7 @@ The output canvas behaves like an `<img>`: give it a CSS size (or let it default
 | `bias` | `0.96` | yes | Ratio the key channel must beat each other channel by. |
 | `softness` | `28` | yes | Width of the partial-alpha edge ramp. Higher = softer. |
 | `spill` | `0.45` | yes | Strength of key-color cast removal on non-keyed edge pixels. |
+| `autoTune` | `false` | no | Fit `minKey`/`bias`/`softness` to the footage: `true` (once, on the first frame) or `'adaptive'` (continuous). |
 | `edgeDissolve` | `false` | yes | Enable blur + vignette + fade edge treatment. |
 | `fadeTop` | `0.05` | yes | Top alpha fade, as a fraction of height (edgeDissolve only). |
 | `fadeBottom` | `0.18` | yes | Bottom alpha fade fraction (edgeDissolve only). |
@@ -78,7 +80,11 @@ The output canvas behaves like an `<img>`: give it a CSS size (or let it default
 | `.update(partial)` | Change options live; applies next frame (immediately when paused). |
 | `.play()` / `.pause()` | Control the underlying video. |
 | `.renderFrame()` | Render the current frame once (e.g. after seeking while paused). |
-| `.destroy({removeCanvas})` | Stop and release everything. Last instance releases the shared GL context. |
+| `.autoTune(opts?)` | Analyze the current frame and fit `minKey`/`bias`/`softness`. Returns `{ok, params, backgroundFraction, applied}`. |
+| `.sampleFrame(opts?)` | Downscaled `ImageData` of the current source frame (or `null`). |
+| `.use(plugin)` | Attach a plugin (see Plugins). Returns `this`. |
+| `.unuse(name)` | Detach a plugin by name. Returns `true` if it was attached. |
+| `.destroy({removeCanvas})` | Stop and release everything (plugins detach first). Last instance releases the shared GL context. |
 | `ChromaKeyVideo.isWebGLAvailable()` | Static capability check. |
 
 ### Events (`EventTarget`)
@@ -88,10 +94,66 @@ The output canvas behaves like an `<img>`: give it a CSS size (or let it default
 | `backend` | `'webgl'` \| `'canvas2d'` | Backend decided or changed (e.g. context loss). |
 | `started` | — | First frame rendered. |
 | `error` | underlying error | Video load failure, tainted canvas (missing CORS), etc. |
+| `autotune` | the `autoTune()` result object | Every auto-tune run (manual, option, or plugin). |
+| `pluginerror` | `{plugin, error}` | A plugin hook threw; the plugin was detached, the player keeps running. |
 
 ### `<chroma-key-video>` element
 
-`defineChromaKeyVideoElement(tagName?)` registers the element. Attributes: `src`, `autoplay`, `loop`, `muted`, `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`, `fade-top`, `fade-bottom`, `max-pixel-ratio`. Numeric attributes update live. The underlying player is exposed as `element.player`.
+`defineChromaKeyVideoElement(tagName?)` registers the element. Attributes: `src`, `autoplay`, `loop`, `muted`, `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`, `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`, `fade-bottom`, `max-pixel-ratio`. Numeric attributes update live. The underlying player is exposed as `element.player`.
+
+## Auto-tune
+
+`minKey`, `bias`, and `softness` depend on the footage — how saturated the screen is, how evenly it's lit, how much the codec drifted the color. Auto-tune measures that instead of guessing: it downsamples the current frame (~9K pixels, a fraction of a millisecond), finds the key-dominant background population, and derives the three parameters from its percentiles. `spill` is left alone — it's a taste setting.
+
+Three ways to use it:
+
+```js
+// 1. One-shot, whenever you like:
+player.autoTune();                       // → {ok, params, backgroundFraction, applied}
+
+// 2. At construction — tune once on the first frame:
+new ChromaKeyVideo(src, { autoTune: true });
+
+// 3. Continuous — re-tune as the video plays (lighting changes, scene cuts):
+new ChromaKeyVideo(src, { autoTune: 'adaptive' });
+// or with control over cadence and smoothing:
+import { autoTunePlugin } from './src/chromakey.js';
+player.use(autoTunePlugin({ adaptive: true, interval: 1500, smoothing: 0.5 }));
+```
+
+Adaptive runs blend into the current values (exponential moving average, `smoothing` = weight of the old value) and skip the update entirely when the change is below visibility thresholds — a static scene converges and then costs only the analysis, no re-renders. Every run fires an `autotune` event with the result; `{ok: false, reason}` reports `'not-ready'`, `'unreadable'` (tainted canvas), or `'no-background'` (under 2% of pixels look like a key screen — the current settings are left untouched).
+
+## Plugins
+
+The plugin system exists so optional behavior (like auto-tune) stays out of the render path until you ask for it — and so your extensions can't break the player.
+
+```js
+player.use({
+  name: 'fps-probe',
+  attach(ctx)        { ctx.every(1000, () => console.log(ctx.getOptions())); },
+  frame(ctx, info)   { /* runs after each rendered frame: {frameCount, backend, width, height} */ },
+  detach(ctx)        { /* cleanup beyond timers/listeners, which are automatic */ },
+});
+player.unuse('fps-probe');
+```
+
+Plugins never touch the player instance. They get a frozen `ctx` facade:
+
+| `ctx` member | Description |
+|---|---|
+| `video`, `canvas`, `backend`, `isDestroyed` | Read-only accessors to the live values. |
+| `getOptions()` | Copy of the current options. |
+| `update(partial)`, `autoTune(opts)`, `sampleFrame(opts)`, `requestRender()` | The player's public surface. |
+| `every(ms, fn)` | Managed interval — auto-cleared on detach/destroy. Returns a cancel function. |
+| `on(type, fn, opts)` | Managed player-event listener — auto-removed on detach/destroy. Returns an off function. |
+| `emit(type, detail)` | Dispatch a CustomEvent on the player (namespace your own event types). |
+
+Isolation and cost:
+
+- A throw in any hook detaches that plugin, fires `pluginerror`, and leaves the player and other plugins running.
+- Timers and listeners a plugin registered through `ctx` are cleaned up automatically on detach and on `destroy()`.
+- With no plugins attached the per-frame overhead is a single `Map.size` check — zero allocation, zero calls.
+- Plugins are plain functions running with the page's privileges: only attach code you trust, same as any script you include.
 
 ## How the keying works
 
@@ -139,7 +201,7 @@ npm install
 npx playwright test
 ```
 
-The e2e suite (Playwright, headless Chromium with SwiftShader) generates synthetic green/blue-screen test patterns via `canvas.captureStream()`, renders them through the library, and asserts output pixels: transparency, ramp alpha, spill values, WebGL↔Canvas2D parity, 12 concurrent instances, edge fades, orientation, destroy semantics, the custom element, and the encoded-URL source path.
+The e2e suite (Playwright, headless Chromium with SwiftShader) generates synthetic green/blue-screen test patterns via `canvas.captureStream()`, renders them through the library, and asserts output pixels: transparency, ramp alpha, spill values, WebGL↔Canvas2D parity, 12 concurrent instances, edge fades, orientation, destroy semantics, the custom element, the encoded-URL source path, plugin lifecycle and error isolation, one-shot and adaptive auto-tune (including convergence), and the `auto-tune` element attribute.
 
 ## Demo
 
@@ -148,7 +210,7 @@ npm run serve
 # open http://localhost:4173/demo/
 ```
 
-The demo includes an animated synthetic green-screen presenter, live tuning sliders, an edge-dissolve toggle, and a URL input for your own footage.
+The demo includes an animated synthetic green-screen presenter, live tuning sliders, an edge-dissolve toggle, an Auto-tune button with an adaptive checkbox (the sliders follow the derived values), and a URL input for your own footage.
 
 ## License
 
