@@ -2,7 +2,10 @@
 // e2e suite (headless Chromium, SwiftShader) so results are comparable across
 // commits on the same machine/CI runner.
 //
-// Measures, on a synthetic 1280x720 green-screen source (no network needed):
+// Measures, on a synthetic 1280x720 green-screen source (no network needed)
+// — or on a real clip when BENCH_SRC is set to a server-relative video URL
+// (npm run bench:footage benches the wind-blown-hair stress clip; results
+// land in bench-results-footage.json, keeping the synthetic baseline file):
 //   - per-frame render cost: WebGL key pass, WebGL + edgeDissolve, Canvas2D CPU
 //   - autoTune() cost per run
 //   - sustained fps for 1 x 720p player and 12 concurrent players
@@ -17,6 +20,8 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 
+const SRC = process.env.BENCH_SRC || null;
+
 const CEILINGS = {
   webglKeyMs: 50,
   webglDissolveMs: 80,
@@ -30,8 +35,9 @@ test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ pa
   await page.goto('/test/fixture.html');
   await page.waitForFunction(() => window.fixtureReady === true);
 
-  const r = await page.evaluate(async () => {
+  const r = await page.evaluate(async (src) => {
     const results = {};
+    results.source = src || 'synthetic 1280x720 captureStream';
 
     const gl = document.createElement('canvas').getContext('webgl');
     const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
@@ -61,16 +67,18 @@ test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ pa
       return { stream, timer };
     }
 
-    function makePlayer(opts = {}) {
+    function makePlayer(opts = {}, css = { w: W, h: H }) {
       return new Promise((resolve, reject) => {
-        const { stream, timer } = makeBigPattern();
-        const player = new window.CKV.ChromaKeyVideo(stream, {
+        let timer = 0;
+        let source = src;
+        if (!source) ({ stream: source, timer } = makeBigPattern());
+        const player = new window.CKV.ChromaKeyVideo(source, {
           maxPixelRatio: 1,
-          videoAttributes: { ...window.CKV.DEFAULTS.videoAttributes, autoplay: true },
+          videoAttributes: { ...window.CKV.DEFAULTS.videoAttributes, autoplay: true, loop: true },
           ...opts,
         });
-        player.canvas.style.width = W + 'px';
-        player.canvas.style.height = H + 'px';
+        player.canvas.style.width = css.w + 'px';
+        player.canvas.style.height = css.h + 'px';
         player.mount(document.getElementById('stage'));
         const timeout = setTimeout(() => reject(new Error('bench player never started')), 15000);
         player.addEventListener('started', () => {
@@ -121,18 +129,27 @@ test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ pa
     big.player.destroy();
     clearInterval(big.timer);
 
-    // ── 12 concurrent players (fixture-scale 320x240 sources) ─────────────
-    const ids = [];
+    // ── 12 concurrent players ──────────────────────────────────────────────
+    // Synthetic run: fixture-scale 320x240 pattern streams (the baseline).
+    // BENCH_SRC run: 12 independent decodes of the real clip — a heavier,
+    // more realistic load (decode cost is part of what a page pays).
+    const fleet = [];
     for (let i = 0; i < 12; i++) {
-      ids.push(await window.createPlayer({}, { cssWidth: 160, cssHeight: 120 }));
+      if (src) {
+        fleet.push(await makePlayer({}, { w: 160, h: 120 }));
+      } else {
+        const id = await window.createPlayer({}, { cssWidth: 160, cssHeight: 120 });
+        fleet.push(window.players[id]);
+        fleet[i].fixtureId = id;
+      }
     }
     await new Promise((res) => setTimeout(res, 500));
-    const before = ids.map((id) => window.players[id].player.frameCount);
+    const before = fleet.map((f) => f.player.frameCount);
     const c0 = performance.now();
     await new Promise((res) => setTimeout(res, 2000));
     const elapsed = performance.now() - c0;
-    const fpsAll = ids.map((id, i) =>
-      +(((window.players[id].player.frameCount - before[i]) / elapsed) * 1000).toFixed(1));
+    const fpsAll = fleet.map((f, i) =>
+      +(((f.player.frameCount - before[i]) / elapsed) * 1000).toFixed(1));
     results.fpsEachOf12Min = Math.min(...fpsAll);
     results.fpsEachOf12Max = Math.max(...fpsAll);
 
@@ -150,11 +167,15 @@ test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ pa
     results.longFramesOf120 = longFrames;
     results.worstFrameMs = +worst.toFixed(1);
 
-    ids.forEach((id) => window.destroyPlayer(id));
+    fleet.forEach((f) => {
+      if (f.fixtureId) window.destroyPlayer(f.fixtureId);
+      else { f.player.destroy(); clearInterval(f.timer); }
+    });
     return results;
-  });
+  }, SRC);
 
   const rows = [
+    ['Source', r.source],
     ['GPU renderer', r.renderer],
     ['Output buffer', r.outputSize],
     ['WebGL key pass', `${r.webglKeyMs} ms/frame`],
@@ -166,21 +187,24 @@ test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ pa
   ];
 
   // ── Canvas2D CPU path (separate evaluate keeps the GL run uncontended) ──
-  const cpu = await page.evaluate(async () => {
+  const cpu = await page.evaluate(async (src) => {
     const W = 1280, H = 720;
-    const c = document.createElement('canvas');
-    c.width = W; c.height = H;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = 'rgb(40,200,40)'; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = 'rgb(200,40,40)'; ctx.fillRect(540, 100, 200, 520);
-    const stream = c.captureStream(30);
-    const timer = setInterval(() => ctx.fillRect(540, 100, 200, 520), 50);
+    let source = src, timer = 0;
+    if (!source) {
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'rgb(40,200,40)'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = 'rgb(200,40,40)'; ctx.fillRect(540, 100, 200, 520);
+      source = c.captureStream(30);
+      timer = setInterval(() => ctx.fillRect(540, 100, 200, 520), 50);
+    }
 
     const player = await new Promise((resolve, reject) => {
-      const p = new window.CKV.ChromaKeyVideo(stream, {
+      const p = new window.CKV.ChromaKeyVideo(source, {
         forceCanvas2D: true,
         maxPixelRatio: 1,
-        videoAttributes: { ...window.CKV.DEFAULTS.videoAttributes, autoplay: true },
+        videoAttributes: { ...window.CKV.DEFAULTS.videoAttributes, autoplay: true, loop: true },
       });
       p.canvas.style.width = W + 'px';
       p.canvas.style.height = H + 'px';
@@ -202,11 +226,12 @@ test('benchmark: render cost, autoTune, sustained fps, concurrency', async ({ pa
     player.destroy();
     clearInterval(timer);
     return { cpuKeyMs: +ms.toFixed(2), backend, bufferSize };
-  });
+  }, SRC);
 
-  rows.splice(4, 0, ['Canvas2D CPU fallback', `${cpu.cpuKeyMs} ms/frame`]);
+  rows.splice(5, 0, ['Canvas2D CPU fallback', `${cpu.cpuKeyMs} ms/frame`]);
   const results = { ...r, ...cpu, timestamp: new Date().toISOString() };
-  fs.writeFileSync('bench-results.json', JSON.stringify(results, null, 2) + '\n');
+  const outFile = SRC ? 'bench-results-footage.json' : 'bench-results.json';
+  fs.writeFileSync(outFile, JSON.stringify(results, null, 2) + '\n');
 
   const table = rows.map(([k, v]) => `| ${k} | ${v} |`).join('\n');
   const md = `### chroma-key-video benchmark\n\n| Measurement | Result |\n|---|---|\n${table}\n`;

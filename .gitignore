@@ -2,4 +2,4 @@ node_modules/
 test-results/
 playwright-report/
 .DS_Store
-bench-results.json
+bench-results*.json
