@@ -16,8 +16,17 @@
 
 import { test, expect } from '@playwright/test';
 
-const CLIPS = ['greenscreen-talk.mp4', 'greenscreen-calm.mp4', 'greenscreen-hair.mp4'];
-const SEEK_TIME = 2.0;
+// Per-clip seek times pick a hard frame, verified against the decoded
+// footage. The hair clip seeks to its worst frame — hair mid-flight, dense
+// mixed hair/screen pixels that fail the keying gate and rely on despill —
+// with a tight green-cast ceiling: the graduated despill measures exactly 0
+// there, while a constant-fraction despill leaves ~0.15% of visible pixels
+// with a strong cast (the green blobs on hair edges this test pins down).
+const CLIPS = [
+  { file: 'greenscreen-talk.mp4', seek: 2.0, maxGreenCast: 0.005 },
+  { file: 'greenscreen-calm.mp4', seek: 2.0, maxGreenCast: 0.005 },
+  { file: 'greenscreen-hair.mp4', seek: 1.2, maxGreenCast: 0.0005 },
+];
 
 // Fractional sample points chosen from the footage: in all three clips the
 // presenter sits center-frame (head around y 0.2-0.5, torso filling
@@ -85,10 +94,10 @@ async function analyzeClip(page, clip, options) {
     };
     window.destroyPlayer(id);
     return result;
-  }, { clip, options, seekTime: SEEK_TIME, bgPoints: BACKGROUND_POINTS, fgPoints: SUBJECT_POINTS });
+  }, { clip: clip.file, options, seekTime: clip.seek, bgPoints: BACKGROUND_POINTS, fgPoints: SUBJECT_POINTS });
 }
 
-function assertQuality(m, backendName) {
+function assertQuality(m, backendName, maxGreenCast) {
   expect(m.backend).toBe(backendName);
 
   // Auto-tune found the screen and derived sane parameters.
@@ -108,19 +117,19 @@ function assertQuality(m, backendName) {
   for (const [, , , a] of m.background) expect(a).toBeLessThanOrEqual(8);
   for (const [, , , a] of m.subject) expect(a).toBeGreaterThanOrEqual(250);
 
-  // Spill suppression: almost no visible pixel keeps a strong green cast
-  // (measured ~0.04% on this footage; threshold leaves ~10x margin).
-  expect(m.greenCastFraction).toBeLessThan(0.005);
+  // Spill suppression: almost no visible pixel keeps a strong green cast.
+  // Ceiling is per-clip (see CLIPS) — tightest on the hair stress frame.
+  expect(m.greenCastFraction).toBeLessThan(maxGreenCast);
 }
 
 for (const clip of CLIPS) {
-  test(`real footage ${clip} — WebGL keys clean after auto-tune`, async ({ page }) => {
+  test(`real footage ${clip.file} — WebGL keys clean after auto-tune`, async ({ page }) => {
     await openFixture(page);
-    assertQuality(await analyzeClip(page, clip, {}), 'webgl');
+    assertQuality(await analyzeClip(page, clip, {}), 'webgl', clip.maxGreenCast);
   });
 
-  test(`real footage ${clip} — Canvas2D keys clean after auto-tune`, async ({ page }) => {
+  test(`real footage ${clip.file} — Canvas2D keys clean after auto-tune`, async ({ page }) => {
     await openFixture(page);
-    assertQuality(await analyzeClip(page, clip, { forceCanvas2D: true }), 'canvas2d');
+    assertQuality(await analyzeClip(page, clip, { forceCanvas2D: true }), 'canvas2d', clip.maxGreenCast);
   });
 }

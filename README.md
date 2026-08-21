@@ -54,7 +54,7 @@ The output canvas behaves like an `<img>`: give it a CSS size (or let it default
 | `minKey` | `36` | yes | Floor (0-255) the key channel must exceed to key. |
 | `bias` | `0.96` | yes | Ratio the key channel must beat each other channel by. |
 | `softness` | `28` | yes | Width of the partial-alpha edge ramp. Higher = softer. |
-| `spill` | `0.45` | yes | Strength of key-color cast removal on non-keyed edge pixels. |
+| `spill` | `0.45` | yes | Base strength of key-color cast removal on non-keyed edge pixels; ramps to full removal for strong casts. |
 | `autoTune` | `false` | no | Fit `minKey`/`bias`/`softness` to the footage: `true` (once, on the first frame) or `'adaptive'` (continuous). |
 | `edgeDissolve` | `false` | yes | Enable blur + vignette + fade edge treatment. |
 | `fadeTop` | `0.05` | yes | Top alpha fade, as a fraction of height (edgeDissolve only). |
@@ -169,7 +169,7 @@ keyed when: key is the max channel, key > minKey, key > otherA*bias,
 alpha = 1 - clamp((dom - 2) / max(8, softness*0.55) + (sat - 0.08)*1.8, 0, 1)
 ```
 
-Keyed pixels are also fully despilled — the key channel is clamped to the max of the other two — so partially keyed edge pixels composite without a green halo. Pixels that fail the gate but still carry a key cast (`dom > 4`, `key > 40`) get `dom * spill` subtracted from the key channel, which removes the residual cast on hair and shoulders without keying them.
+Keyed pixels are also fully despilled — the key channel is clamped to the max of the other two — so partially keyed edge pixels composite without a green halo. Pixels that fail the gate but still carry a key cast (`dom > 4`, `key > 40`) get `dom * min(max(1, spill), spill * (1 + dom/32))` subtracted from the key channel: faint casts are reduced by the `spill` fraction (a taste setting), and the removal fraction ramps up to a full clamp as the cast grows. The ramp handles mixed hair/screen pixels — strands thin enough that a pixel is part hair, part screen — which are too dark to pass the keying gate but carry a strong cast; a constant fraction would leave them visibly green. The trade-off is standard for keyers: a genuinely green foreground object is desaturated toward its other channels.
 
 With `edgeDissolve`, the keyed layer additionally runs through a separable 9-tap Gaussian blur mixed in by a bottom-anchored vignette (with desaturation toward luma), plus explicit top/bottom alpha fade ramps and a redundant CSS mask fade.
 

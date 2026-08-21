@@ -139,7 +139,10 @@ void main() {
  *    edge pixel that kept its key color would composite as a green halo
  *    around hair and shoulders.
  *  - Spill: pixels that did NOT key but still carry a key-color cast get the
- *    cast subtracted, proportional to dominance and the `spill` option.
+ *    cast subtracted. The removal fraction starts at the `spill` option for
+ *    faint casts and ramps up to a full clamp as dominance grows: mixed
+ *    hair/screen pixels too dark to pass the keying gate carry a strong
+ *    cast, and a constant fraction would leave them visibly green.
  *
  * Output is premultiplied alpha (required for correct GL compositing and
  * for the downstream blur pass to weigh transparent pixels correctly).
@@ -175,7 +178,8 @@ void main() {
     alpha *= 1.0 - keyed;
     color.${KEY} = max(oA, oB) / 255.0;
   } else if (dom > 4.0 && key > 40.0) {
-    color.${KEY} = max(0.0, key - dom * u_spill) / 255.0;
+    float despill = min(max(1.0, u_spill), u_spill * (1.0 + dom / 32.0));
+    color.${KEY} = max(0.0, key - dom * despill) / 255.0;
   }
 
   gl_FragColor = vec4(color * alpha, alpha);
@@ -1160,7 +1164,8 @@ export class ChromaKeyVideo extends EventTarget {
           d[i + 3] = d[i + 3] * (1 - keyed);
           d[i + ki] = Math.max(oA, oB);
         } else if (dom > 4 && key > 40) {
-          d[i + ki] = Math.max(0, key - dom * spill);
+          const despill = Math.min(Math.max(1, spill), spill * (1 + dom / 32));
+          d[i + ki] = Math.max(0, key - dom * despill);
         }
         if (rowFade !== 1) d[i + 3] *= rowFade;
       }
