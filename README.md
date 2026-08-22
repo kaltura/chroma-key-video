@@ -1,7 +1,6 @@
 # chroma-key-video
 
 [![CI](https://github.com/kaltura/chroma-key-video/actions/workflows/ci.yml/badge.svg)](https://github.com/kaltura/chroma-key-video/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/chroma-key-video)](https://www.npmjs.com/package/chroma-key-video)
 [![Bundle size](https://img.shields.io/badge/minified-24KB-blue)](scripts/check-size.mjs)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -16,19 +15,15 @@ Real-time green/blue-screen keying for HTML video, in the browser. Point it at a
 
 ## Install
 
-```bash
-npm install chroma-key-video
-```
-
-Or straight from a CDN, no install or build step:
+Straight from jsDelivr, no install or build step — it mirrors this repo directly:
 
 ```html
 <script type="module">
-  import { ChromaKeyVideo } from 'https://cdn.jsdelivr.net/npm/chroma-key-video/src/chromakey.js';
+  import { ChromaKeyVideo } from 'https://cdn.jsdelivr.net/gh/kaltura/chroma-key-video/src/chromakey.js';
 </script>
 ```
 
-Pin a version for production (`@1.2.0` instead of unpinned) so a new release can't change behavior under you.
+Pin a version for production (`@v1.2.0` instead of unpinned) so a new release can't change behavior under you.
 
 ## Quick start
 

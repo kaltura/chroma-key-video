@@ -1,0 +1,40 @@
+# jsDelivr mirrors GitHub directly (cdn.jsdelivr.net/gh/kaltura/chroma-key-video),
+# so no build or publish step exists. Version-pinned URLs (@v1.2.0) are
+# immutable and always fresh. This just re-runs the CI gates against the
+# released tag and purges jsDelivr's cache for the unpinned URL, so people
+# who load without pinning a version see the new release right away instead
+# of waiting out the cache TTL.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  verify-and-purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: node --check src/chromakey.js
+
+      - name: Bundle size gate
+        run: npm run check:size
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E tests
+        run: npm test
+
+      - name: Purge jsDelivr cache for the unpinned GitHub URL
+        run: curl -fsS "https://purge.jsdelivr.net/gh/kaltura/chroma-key-video/src/chromakey.js"
