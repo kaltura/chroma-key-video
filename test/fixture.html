@@ -43,10 +43,10 @@ function drawPattern(ctx, channel) {
 
 // captureStream only emits frames on draw commits, so keep redrawing the
 // (identical) pattern on an interval to feed the video a steady frame rate.
-function makePatternStream(channel = 'green') {
+function makePatternStream(channel = 'green', w = W, h = H) {
   const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = w;
+  canvas.height = h;
   const ctx = canvas.getContext('2d');
   drawPattern(ctx, channel);
   const stream = canvas.captureStream(30);
@@ -55,10 +55,12 @@ function makePatternStream(channel = 'green') {
 }
 
 // Create a player from a synthetic pattern stream, mount it, wait for the
-// first rendered frame, and return its handle id.
-window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeight = H } = {}) => {
+// first rendered frame, and return its handle id. srcWidth/srcHeight set the
+// pattern canvas's (i.e. the video's native) resolution, independent of the
+// player canvas's CSS display size (cssWidth/cssHeight).
+window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeight = H, srcWidth = W, srcHeight = H } = {}) => {
   return new Promise((resolve, reject) => {
-    const { stream, timer } = makePatternStream(channel);
+    const { stream, canvas, timer } = makePatternStream(channel, srcWidth, srcHeight);
     const player = new ChromaKeyVideo(stream, {
       maxPixelRatio: 1,
       videoAttributes: { ...DEFAULTS.videoAttributes, autoplay: true },
@@ -68,7 +70,7 @@ window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeigh
     player.canvas.style.height = cssHeight + 'px';
     player.mount(document.getElementById('stage'));
     const id = String(nextId++);
-    window.players[id] = { player, timer };
+    window.players[id] = { player, timer, sourceCanvas: canvas, channel };
     const timeout = setTimeout(() => reject(new Error('player never started')), 10000);
     player.addEventListener('started', () => {
       // Let a couple more frames land so sampling sees steady-state output.
@@ -77,6 +79,16 @@ window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeigh
     player.addEventListener('error', (e) => reject(e.detail));
     player.play().catch(() => {});
   });
+};
+
+// Resizes a player's source pattern canvas, simulating a live track's native
+// resolution changing mid-stream (e.g. a WebRTC renegotiation). The video
+// element fires its native 'resize' event once the new dimensions decode.
+window.resizeSource = (id, w, h) => {
+  const { sourceCanvas, channel } = window.players[id];
+  sourceCanvas.width = w;
+  sourceCanvas.height = h;
+  drawPattern(sourceCanvas.getContext('2d'), channel);
 };
 
 // Record ~1.2s of the pattern to a webm blob and return an object URL —
