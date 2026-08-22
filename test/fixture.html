@@ -59,7 +59,9 @@ function makePatternStream(channel = 'green', w = W, h = H, fps = 30) {
 }
 
 // Create a player from a synthetic pattern stream, mount it, wait for the
-// first rendered frame, and return its handle id.
+// first rendered frame, and return its handle id. srcWidth/srcHeight set the
+// pattern canvas's (i.e. the video's native) resolution, independent of the
+// player canvas's CSS display size (cssWidth/cssHeight).
 window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeight = H, srcWidth = W, srcHeight = H, fps = 30 } = {}) => {
   return new Promise((resolve, reject) => {
     const { stream, canvas, timer, ctx } = makePatternStream(channel, srcWidth, srcHeight, fps);
@@ -104,6 +106,16 @@ window.playbackQuality = (id) => {
   const v = window.players[id].player.video;
   if (typeof v.getVideoPlaybackQuality !== 'function') return null;
   return v.getVideoPlaybackQuality().totalVideoFrames;
+};
+
+// Resizes a player's source pattern canvas, simulating a live track's native
+// resolution changing mid-stream (e.g. a WebRTC renegotiation). The video
+// element fires its native 'resize' event once the new dimensions decode.
+window.resizeSource = (id, w, h) => {
+  const { sourceCanvas, channel } = window.players[id];
+  sourceCanvas.width = w;
+  sourceCanvas.height = h;
+  drawPattern(sourceCanvas.getContext('2d'), channel);
 };
 
 // Record ~1.2s of the pattern to a webm blob and return an object URL —

@@ -365,6 +365,79 @@ test.describe('chroma-key-video', () => {
     expect(bg2[3]).toBeLessThanOrEqual(2);
   });
 
+  test('canvas aspect-ratio updates when the video\'s native resolution changes (issue #2)', async ({ page }) => {
+    const id = await create(page, {}, { srcWidth: 320, srcHeight: 240 });
+    const initial = await page.evaluate(
+      (pid) => window.players[pid].player.canvas.style.aspectRatio, id);
+    expect(initial).toBe('320 / 240');
+
+    await page.evaluate((pid) => window.resizeSource(pid, 640, 480), id);
+    await page.waitForFunction(
+      (pid) => window.players[pid].player.canvas.style.aspectRatio === '640 / 480',
+      id, { timeout: 5000 },
+    );
+  });
+
+  test('a user-set aspect-ratio is never clobbered by a later resolution change (issue #2)', async ({ page }) => {
+    const id = await create(page, {}, { srcWidth: 320, srcHeight: 240 });
+    await page.evaluate((pid) => {
+      window.players[pid].player.canvas.style.aspectRatio = '1 / 1';
+    }, id);
+
+    await page.evaluate((pid) => window.resizeSource(pid, 640, 480), id);
+    // Give the native 'resize' event a few frames to have fired, then assert
+    // the user's explicit override survived it untouched.
+    await page.waitForTimeout(500);
+    const aspect = await page.evaluate(
+      (pid) => window.players[pid].player.canvas.style.aspectRatio, id);
+    expect(aspect).toBe('1 / 1');
+  });
+
+  test('two concurrent instances at different native resolutions track aspect independently (issue #2)', async ({ page }) => {
+    const a = await create(page, {}, { srcWidth: 320, srcHeight: 240 });
+    const b = await create(page, {}, { srcWidth: 480, srcHeight: 270 });
+
+    expect(await page.evaluate((pid) => window.players[pid].player.canvas.style.aspectRatio, a))
+      .toBe('320 / 240');
+    expect(await page.evaluate((pid) => window.players[pid].player.canvas.style.aspectRatio, b))
+      .toBe('480 / 270');
+
+    await page.evaluate((pid) => window.resizeSource(pid, 640, 480), a);
+    await page.waitForFunction(
+      (pid) => window.players[pid].player.canvas.style.aspectRatio === '640 / 480',
+      a, { timeout: 5000 },
+    );
+
+    // Instance b must be untouched by a's resize — no shared/module-level state.
+    expect(await page.evaluate((pid) => window.players[pid].player.canvas.style.aspectRatio, b))
+      .toBe('480 / 270');
+  });
+
+  test('custom element: a pre-set host aspect-ratio is never clobbered (issue #2)', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      window.CKV.defineChromaKeyVideoElement();
+      const url = await window.makePatternVideoURL();
+      const el = document.createElement('chroma-key-video');
+      el.setAttribute('src', url);
+      el.setAttribute('autoplay', '');
+      el.setAttribute('loop', '');
+      el.setAttribute('muted', '');
+      el.style.width = '320px';
+      el.style.aspectRatio = '1 / 1'; // set before connecting
+      document.body.appendChild(el);
+
+      const player = el.player;
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('element player never started')), 10000);
+        player.addEventListener('started', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      return el.style.aspectRatio;
+    });
+
+    expect(result).toBe('1 / 1');
+  });
+
   test('custom element: auto-tune attribute overrides bad manual params', async ({ page }) => {
     const result = await page.evaluate(async () => {
       window.CKV.defineChromaKeyVideoElement();

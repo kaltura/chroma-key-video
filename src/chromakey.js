@@ -608,6 +608,24 @@ function getSharedEngine() {
   return sharedEngine;
 }
 
+/**
+ * Syncs `target.style.aspectRatio` to `video`'s native size, unless the
+ * caller has since set their own value. `state` (the owning instance) holds
+ * the last value this function itself wrote, so a real resolution change
+ * (WebRTC renegotiation, adaptive bitrate) re-applies on every call — while
+ * an explicit user override, which never matches the last-applied value, is
+ * left untouched. See issue #2.
+ */
+function syncAspectRatio(target, video, state) {
+  if (!video.videoWidth || !video.videoHeight) return;
+  const current = target.style.aspectRatio;
+  if (current && current !== state._lastAppliedAspect) return;
+  const next = `${video.videoWidth} / ${video.videoHeight}`;
+  if (next === current) return;
+  target.style.aspectRatio = next;
+  state._lastAppliedAspect = next;
+}
+
 /* ════════════════════════════════════════════════════════════════════════
  * ChromaKeyVideo — the public player class
  * ════════════════════════════════════════════════════════════════════════ */
@@ -680,15 +698,17 @@ export class ChromaKeyVideo extends EventTarget {
       : null;
     if (this._resizeObserver) this._resizeObserver.observe(this.canvas);
 
+    this._lastAppliedAspect = '';
+
     this._onVideoEvent = (e) => {
-      if (e.type === 'loadedmetadata') this._applyAspect();
+      if (e.type === 'loadedmetadata' || e.type === 'resize') this._applyAspect();
       // Paint paused/seeked frames too — rVFC only fires during playback.
       if (e.type === 'loadeddata' || e.type === 'seeked') this.renderFrame();
       if (e.type === 'error') {
         this.dispatchEvent(new CustomEvent('error', { detail: this.video.error }));
       }
     };
-    for (const type of ['loadedmetadata', 'loadeddata', 'seeked', 'error']) {
+    for (const type of ['loadedmetadata', 'resize', 'loadeddata', 'seeked', 'error']) {
       this.video.addEventListener(type, this._onVideoEvent);
     }
     if (this.video.readyState >= 1) this._applyAspect();
@@ -931,7 +951,7 @@ export class ChromaKeyVideo extends EventTarget {
     if (this._rafHandle) cancelAnimationFrame(this._rafHandle);
     if (this._stallWatchdog) clearInterval(this._stallWatchdog);
     if (this._resizeObserver) this._resizeObserver.disconnect();
-    for (const type of ['loadedmetadata', 'loadeddata', 'seeked', 'error']) {
+    for (const type of ['loadedmetadata', 'resize', 'loadeddata', 'seeked', 'error']) {
       this.video.removeEventListener(type, this._onVideoEvent);
     }
 
@@ -1042,11 +1062,9 @@ export class ChromaKeyVideo extends EventTarget {
     return video;
   }
 
-  /** Default the canvas's aspect ratio to the video's, unless the user set one. */
+  /** Syncs the canvas's aspect ratio to the video's native size. See {@link syncAspectRatio}. */
   _applyAspect() {
-    if (this.video.videoWidth && !this.canvas.style.aspectRatio) {
-      this.canvas.style.aspectRatio = `${this.video.videoWidth} / ${this.video.videoHeight}`;
-    }
+    syncAspectRatio(this.canvas, this.video, this);
   }
 
   /**
@@ -1427,16 +1445,17 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
       if (!src) return;
       this._player = new ChromaKeyVideo(src, this._collectOptions());
       this._root.appendChild(this._player.canvas);
-      this._player.video.addEventListener('loadedmetadata', () => {
-        if (!this.style.aspectRatio && this._player) {
-          const v = this._player.video;
-          this.style.aspectRatio = `${v.videoWidth} / ${v.videoHeight}`;
-        }
-      }, { once: true });
+      this._lastAppliedAspect = '';
+      this._syncAspect = () => syncAspectRatio(this, this._player.video, this);
+      this._player.video.addEventListener('loadedmetadata', this._syncAspect);
+      this._player.video.addEventListener('resize', this._syncAspect);
     }
 
     _teardown() {
       if (this._player) {
+        this._player.video.removeEventListener('loadedmetadata', this._syncAspect);
+        this._player.video.removeEventListener('resize', this._syncAspect);
+        this._syncAspect = null;
         this._player.destroy();
         this._player = null;
       }
