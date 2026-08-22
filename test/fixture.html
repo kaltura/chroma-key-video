@@ -43,24 +43,28 @@ function drawPattern(ctx, channel) {
 
 // captureStream only emits frames on draw commits, so keep redrawing the
 // (identical) pattern on an interval to feed the video a steady frame rate.
-function makePatternStream(channel = 'green', w = W, h = H) {
+// fps=0 uses the no-arg, draw-triggered captureStream() instead of a fixed
+// capture rate, so stopping the redraw interval genuinely stops new frames
+// from being produced (rather than the fixed-rate capture re-encoding the
+// same static content) — needed to simulate a real stalled track.
+function makePatternStream(channel = 'green', w = W, h = H, fps = 30) {
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
   drawPattern(ctx, channel);
-  const stream = canvas.captureStream(30);
+  const stream = fps ? canvas.captureStream(fps) : canvas.captureStream();
   const timer = setInterval(() => drawPattern(ctx, channel), 50);
-  return { stream, canvas, timer };
+  return { stream, canvas, timer, ctx };
 }
 
 // Create a player from a synthetic pattern stream, mount it, wait for the
 // first rendered frame, and return its handle id. srcWidth/srcHeight set the
 // pattern canvas's (i.e. the video's native) resolution, independent of the
 // player canvas's CSS display size (cssWidth/cssHeight).
-window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeight = H, srcWidth = W, srcHeight = H } = {}) => {
+window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeight = H, srcWidth = W, srcHeight = H, fps = 30 } = {}) => {
   return new Promise((resolve, reject) => {
-    const { stream, canvas, timer } = makePatternStream(channel, srcWidth, srcHeight);
+    const { stream, canvas, timer, ctx } = makePatternStream(channel, srcWidth, srcHeight, fps);
     const player = new ChromaKeyVideo(stream, {
       maxPixelRatio: 1,
       videoAttributes: { ...DEFAULTS.videoAttributes, autoplay: true },
@@ -70,7 +74,7 @@ window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeigh
     player.canvas.style.height = cssHeight + 'px';
     player.mount(document.getElementById('stage'));
     const id = String(nextId++);
-    window.players[id] = { player, timer, sourceCanvas: canvas, channel };
+    window.players[id] = { player, timer, sourceCanvas: canvas, sourceCtx: ctx, channel };
     const timeout = setTimeout(() => reject(new Error('player never started')), 10000);
     player.addEventListener('started', () => {
       // Let a couple more frames land so sampling sees steady-state output.
@@ -79,6 +83,29 @@ window.createPlayer = (options = {}, { channel = 'green', cssWidth = W, cssHeigh
     player.addEventListener('error', (e) => reject(e.detail));
     player.play().catch(() => {});
   });
+};
+
+// Stops feeding new frames into a player's source stream, simulating a
+// track that goes silent while still reporting healthy paused/ended/readyState.
+window.stopSource = (id) => {
+  clearInterval(window.players[id].timer);
+  window.players[id].timer = 0;
+};
+
+// Resumes feeding frames after stopSource().
+window.resumeSource = (id) => {
+  const entry = window.players[id];
+  if (entry.timer) return;
+  entry.timer = setInterval(() => drawPattern(entry.sourceCtx, entry.channel), 50);
+};
+
+// Reports the video's decoded-frame counter, for diagnosing whether the
+// stall-detection signal (getVideoPlaybackQuality().totalVideoFrames) is
+// actually advancing/frozen in this browser/environment.
+window.playbackQuality = (id) => {
+  const v = window.players[id].player.video;
+  if (typeof v.getVideoPlaybackQuality !== 'function') return null;
+  return v.getVideoPlaybackQuality().totalVideoFrames;
 };
 
 // Resizes a player's source pattern canvas, simulating a live track's native

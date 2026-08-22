@@ -90,6 +90,13 @@ export const DEFAULTS = Object.freeze({
   /** Pixel budget for the CPU fallback; frames are processed downscaled to fit. */
   maxCPUPixels: 512 * 512,
 
+  /**
+   * Milliseconds of no decoded-frame progress (while playing) before firing
+   * `'stalled'` — catches a track that goes silent while readyState/paused/
+   * ended still look healthy (e.g. a WebRTC failure). `<= 0` disables it.
+   */
+  stallTimeout: 4000,
+
   /** Attributes applied to the <video> element created when `source` is a URL. */
   videoAttributes: Object.freeze({
     muted: true,
@@ -102,6 +109,9 @@ export const DEFAULTS = Object.freeze({
 
 /** Options that select shader variants / backends / plugins and can't change after construction. */
 const IMMUTABLE_OPTIONS = ['channel', 'forceCanvas2D', 'videoAttributes', 'autoTune'];
+
+/** Watchdog polling cadence for stall detection (see `_checkStall`). Fixed; `stallTimeout` is the tunable. */
+const STALL_CHECK_INTERVAL_MS = 500;
 
 function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
@@ -631,6 +641,12 @@ function syncAspectRatio(target, video, state) {
  * - `'autotune'` — detail: the result object of every {@link autoTune} run.
  * - `'pluginerror'` — detail: `{ plugin, error }`, fired when a plugin hook
  *   throws (the plugin is detached; the player keeps running).
+ * - `'stalled'` — detail: `{ elapsedMs }`. Fired once when no new decoded
+ *   frame has arrived for `options.stallTimeout` ms while playing (see
+ *   issue #3). The canvas keeps showing the last good frame; the page
+ *   decides what to do (spinner, reconnect, etc).
+ * - `'recovered'` — detail: `{ elapsedMs }`. Fired once frame delivery
+ *   resumes after a `'stalled'` event.
  */
 export class ChromaKeyVideo extends EventTarget {
   /**
@@ -699,6 +715,11 @@ export class ChromaKeyVideo extends EventTarget {
     if (this.video.readyState >= 2) this.renderFrame();
 
     this._startLoop();
+
+    this._lastFrameQualityCount = -1;
+    this._stallStartedAt = 0;
+    this._isStalled = false;
+    this._stallWatchdog = setInterval(() => this._checkStall(), STALL_CHECK_INTERVAL_MS);
 
     if (this.options.autoTune) {
       this.use(autoTunePlugin({ adaptive: this.options.autoTune === 'adaptive' }));
@@ -928,6 +949,7 @@ export class ChromaKeyVideo extends EventTarget {
       this.video.cancelVideoFrameCallback(this._rvfcHandle);
     }
     if (this._rafHandle) cancelAnimationFrame(this._rafHandle);
+    if (this._stallWatchdog) clearInterval(this._stallWatchdog);
     if (this._resizeObserver) this._resizeObserver.disconnect();
     for (const type of ['loadedmetadata', 'resize', 'loadeddata', 'seeked', 'error']) {
       this.video.removeEventListener(type, this._onVideoEvent);
@@ -1043,6 +1065,45 @@ export class ChromaKeyVideo extends EventTarget {
   /** Syncs the canvas's aspect ratio to the video's native size. See {@link syncAspectRatio}. */
   _applyAspect() {
     syncAspectRatio(this.canvas, this.video, this);
+  }
+
+  /**
+   * Watchdog tick: fires `'stalled'`/`'recovered'` off decoded-frame progress
+   * (see `options.stallTimeout`). Uses `getVideoPlaybackQuality()` rather
+   * than `currentTime` — for a live MediaStream, `currentTime` keeps
+   * advancing on the stream's own clock even when no new frame is decoded,
+   * so it would miss exactly the stall this exists to catch. See issue #3.
+   */
+  _checkStall() {
+    const timeout = this.options.stallTimeout;
+    if (!timeout || timeout <= 0) return;
+    if (typeof this.video.getVideoPlaybackQuality !== 'function') return;
+    if (this.video.paused || this.video.ended) {
+      this._stallStartedAt = 0;
+      return;
+    }
+
+    const count = this.video.getVideoPlaybackQuality().totalVideoFrames;
+    if (count !== this._lastFrameQualityCount) {
+      this._lastFrameQualityCount = count;
+      this._stallStartedAt = 0;
+      if (this._isStalled) {
+        this._isStalled = false;
+        this.dispatchEvent(new CustomEvent('recovered', { detail: { elapsedMs: this._stalledElapsedMs } }));
+      }
+      return;
+    }
+
+    if (!this._stallStartedAt) {
+      this._stallStartedAt = Date.now();
+      return;
+    }
+    const elapsedMs = Date.now() - this._stallStartedAt;
+    if (elapsedMs >= timeout && !this._isStalled) {
+      this._isStalled = true;
+      this._stalledElapsedMs = elapsedMs;
+      this.dispatchEvent(new CustomEvent('stalled', { detail: { elapsedMs } }));
+    }
   }
 
   /** Redundant DOM-level bottom fade (defense in depth alongside the shader fade). */
@@ -1306,6 +1367,7 @@ const ELEMENT_OPTION_ATTRIBUTES = {
   'fade-top': ['fadeTop', Number],
   'fade-bottom': ['fadeBottom', Number],
   'max-pixel-ratio': ['maxPixelRatio', Number],
+  'stall-timeout': ['stallTimeout', Number],
 };
 
 /**
@@ -1314,7 +1376,7 @@ const ELEMENT_OPTION_ATTRIBUTES = {
  * Supported attributes: `src` (required), `autoplay`, `loop`, `muted`,
  * `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`,
  * `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`,
- * `fade-bottom`, `max-pixel-ratio`.
+ * `fade-bottom`, `max-pixel-ratio`, `stall-timeout`.
  *
  * The underlying player is exposed as the element's `.player` property for
  * full programmatic control (events, `update()`, the video element, etc.).

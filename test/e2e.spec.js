@@ -44,6 +44,26 @@ function backend(page, id) {
   return page.evaluate((pid) => window.players[pid].player.backend, id);
 }
 
+// Resolves with the detail of the next `type` event on player `id`, or
+// rejects if it doesn't fire within `timeoutMs`.
+function waitForEvent(page, id, type, timeoutMs = 5000) {
+  return page.evaluate(([pid, t, ms]) => new Promise((resolve, reject) => {
+    const { player } = window.players[pid];
+    const timer = setTimeout(() => reject(new Error(`"${t}" never fired`)), ms);
+    player.addEventListener(t, (e) => { clearTimeout(timer); resolve(e.detail); }, { once: true });
+  }), [id, type, timeoutMs]);
+}
+
+// Resolves with whether `type` fired on player `id` within `waitMs`.
+function didFire(page, id, type, waitMs) {
+  return page.evaluate(([pid, t, ms]) => new Promise((resolve) => {
+    const { player } = window.players[pid];
+    let seen = false;
+    player.addEventListener(t, () => { seen = true; }, { once: true });
+    setTimeout(() => resolve(seen), ms);
+  }), [id, type, waitMs]);
+}
+
 test.describe('chroma-key-video', () => {
   test.beforeEach(async ({ page }) => {
     await openFixture(page);
@@ -449,5 +469,65 @@ test.describe('chroma-key-video', () => {
     expect(result.minKey).toBeLessThan(150);
     expect(result.bg[3]).toBeLessThanOrEqual(30);
     expect(result.fg[3]).toBeGreaterThan(220);
+  });
+
+  test('fires "stalled" when frame delivery stops, then "recovered" once it resumes (issue #3)', async ({ page }) => {
+    const id = await create(page, { stallTimeout: 700 }, { fps: 0 });
+
+    const healthBefore = await page.evaluate((pid) => {
+      const v = window.players[pid].player.video;
+      return { paused: v.paused, ended: v.ended };
+    }, id);
+    expect(healthBefore.paused).toBe(false);
+    expect(healthBefore.ended).toBe(false);
+
+    const stalledPromise = waitForEvent(page, id, 'stalled', 5000);
+    await page.evaluate((pid) => window.stopSource(pid), id);
+    const stalledDetail = await stalledPromise;
+    expect(stalledDetail.elapsedMs).toBeGreaterThanOrEqual(700);
+
+    // readyState/paused/ended still look healthy — that's the whole point:
+    // the video element gives no other signal that frames stopped arriving.
+    const healthDuringStall = await page.evaluate((pid) => {
+      const v = window.players[pid].player.video;
+      return { paused: v.paused, ended: v.ended };
+    }, id);
+    expect(healthDuringStall.paused).toBe(false);
+    expect(healthDuringStall.ended).toBe(false);
+
+    const recoveredPromise = waitForEvent(page, id, 'recovered', 5000);
+    await page.evaluate((pid) => window.resumeSource(pid), id);
+    await recoveredPromise;
+  });
+
+  test('does not fire "stalled" during uninterrupted playback (issue #3)', async ({ page }) => {
+    const id = await create(page, { stallTimeout: 300 }, { fps: 0 });
+    expect(await didFire(page, id, 'stalled', 1500)).toBe(false);
+  });
+
+  test('does not fire "stalled" while intentionally paused (issue #3)', async ({ page }) => {
+    const id = await create(page, { stallTimeout: 300 }, { fps: 0 });
+    await page.evaluate((pid) => {
+      window.players[pid].player.pause();
+      window.stopSource(pid);
+    }, id);
+    expect(await didFire(page, id, 'stalled', 1500)).toBe(false);
+  });
+
+  test('stallTimeout <= 0 disables stall detection (issue #3)', async ({ page }) => {
+    const id = await create(page, { stallTimeout: 0 }, { fps: 0 });
+    await page.evaluate((pid) => window.stopSource(pid), id);
+    expect(await didFire(page, id, 'stalled', 1500)).toBe(false);
+  });
+
+  test('stalling one instance does not affect another (issue #3)', async ({ page }) => {
+    const a = await create(page, { stallTimeout: 700 }, { fps: 0 });
+    const b = await create(page, { stallTimeout: 700 }, { fps: 0 });
+
+    const stalledA = waitForEvent(page, a, 'stalled', 5000);
+    await page.evaluate((pid) => window.stopSource(pid), a);
+    await stalledA;
+
+    expect(await didFire(page, b, 'stalled', 500)).toBe(false);
   });
 });
