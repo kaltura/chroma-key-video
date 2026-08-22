@@ -1,6 +1,6 @@
 {
   "name": "chroma-key-video",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Real-time green/blue-screen chroma keying for HTML video. Zero dependencies, shared-WebGL architecture for unlimited concurrent players, Canvas2D fallback.",
   "repository": {
     "type": "git",
