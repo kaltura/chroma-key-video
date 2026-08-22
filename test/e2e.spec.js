@@ -44,6 +44,28 @@ function backend(page, id) {
   return page.evaluate((pid) => window.players[pid].player.backend, id);
 }
 
+function webrtcVideo(page, channel = 'green') {
+  return page.evaluate((c) => window.createWebRTCVideo(c), channel);
+}
+
+function hlsVideo(page) {
+  return page.evaluate(() => window.createHlsVideo());
+}
+
+function mountElement(page, attrs = {}, videoId = null) {
+  return page.evaluate(
+    ([a, v]) => window.mountElement(a, v),
+    [attrs, videoId],
+  );
+}
+
+function sampleElement(page, id, point) {
+  return page.evaluate(
+    ([eid, [x, y]]) => window.sampleElement(eid, x, y),
+    [id, point],
+  );
+}
+
 // Resolves with the detail of the next `type` event on player `id`, or
 // rejects if it doesn't fire within `timeoutMs`.
 function waitForEvent(page, id, type, timeoutMs = 5000) {
@@ -67,6 +89,13 @@ function didFire(page, id, type, waitMs) {
 test.describe('chroma-key-video', () => {
   test.beforeEach(async ({ page }) => {
     await openFixture(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    // Releases RTCPeerConnections/hls.js instances/redraw timers created by
+    // createWebRTCVideo()/createHlsVideo() (issue #6), so they don't linger
+    // for the rest of this page's lifetime across a whole file's test run.
+    await page.evaluate(() => window.cleanupMedia());
   });
 
   test('WebGL backend keys green to transparent and keeps foreground', async ({ page }) => {
@@ -529,5 +558,120 @@ test.describe('chroma-key-video', () => {
     await stalledA;
 
     expect(await didFire(page, b, 'stalled', 500)).toBe(false);
+  });
+
+  test('custom element: keys a slotted <video> fed by a real WebRTC track (issue #6)', async ({ page }) => {
+    const videoId = await webrtcVideo(page);
+    const id = await mountElement(page, {}, videoId);
+
+    const bg = await sampleElement(page, id, SAMPLES.background);
+    expect(bg[3]).toBeLessThanOrEqual(2);
+    const fg = await sampleElement(page, id, SAMPLES.stripe);
+    expect(fg[3]).toBe(255);
+    expect(fg[0]).toBeGreaterThan(180);
+  });
+
+  test('custom element: keys a slotted <video> loaded by hls.js from a real HLS stream (issue #6)', async ({ page }) => {
+    const videoId = await hlsVideo(page);
+    const id = await mountElement(page, { 'auto-tune': true }, videoId);
+
+    const metrics = await page.evaluate((eid) => {
+      const { player } = window.elements[eid];
+      const c = player.canvas;
+      const ctx = c.getContext('2d');
+      const data = ctx.getImageData(0, 0, c.width, c.height).data;
+      let transparent = 0, opaque = 0;
+      const total = data.length / 4;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 8) transparent++;
+        if (data[i + 3] > 247) opaque++;
+      }
+      return { transparentFraction: transparent / total, opaqueFraction: opaque / total };
+    }, id);
+
+    expect(metrics.transparentFraction).toBeGreaterThan(0.45);
+    expect(metrics.opaqueFraction).toBeGreaterThan(0.15);
+  });
+
+  test('custom element: a slotted <video> takes precedence over the src attribute (issue #6)', async ({ page }) => {
+    const videoId = await webrtcVideo(page);
+    const url = await page.evaluate(() => window.makePatternVideoURL());
+    const id = await mountElement(page, { src: url }, videoId);
+
+    const usesSlotted = await page.evaluate(
+      ([eid, vid]) => window.elements[eid].player.video.id === vid,
+      [id, videoId],
+    );
+    expect(usesSlotted).toBe(true);
+  });
+
+  test('custom element: changing src while a video is slotted does not rebuild the player (issue #6)', async ({ page }) => {
+    const videoId = await webrtcVideo(page);
+    const url = await page.evaluate(() => window.makePatternVideoURL());
+    const id = await mountElement(page, {}, videoId);
+
+    const rebuilt = await page.evaluate(async ([eid, u]) => {
+      const el = window.elements[eid];
+      const player = el.player;
+      el.setAttribute('src', u);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return el.player !== player || player.isDestroyed;
+    }, [id, url]);
+    expect(rebuilt).toBe(false);
+  });
+
+  test('custom element: swapping the slotted <video> at runtime rebuilds the player without leaking the old one (issue #6)', async ({ page }) => {
+    const videoIdA = await webrtcVideo(page);
+    const id = await mountElement(page, {}, videoIdA);
+    const videoIdB = await webrtcVideo(page);
+
+    const result = await page.evaluate(async ([eid, oldVid, newVid]) => {
+      const el = window.elements[eid];
+      const oldPlayer = el.player;
+      el.removeChild(document.getElementById(oldVid));
+      el.appendChild(document.getElementById(newVid));
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('rebuild never happened')), 10000);
+        const check = () => {
+          if (el.player && el.player !== oldPlayer && el.player.video.id === newVid) {
+            clearTimeout(t);
+            resolve();
+            return;
+          }
+          setTimeout(check, 30);
+        };
+        check();
+      });
+      return { oldDestroyed: oldPlayer.isDestroyed, newVideoId: el.player.video.id };
+    }, [id, videoIdA, videoIdB]);
+
+    expect(result.oldDestroyed).toBe(true);
+    expect(result.newVideoId).toBe(videoIdB);
+  });
+
+  test('custom element: destroy() does not pause or dispose an externally-owned slotted <video> (issue #6)', async ({ page }) => {
+    const videoId = await webrtcVideo(page);
+    const id = await mountElement(page, {}, videoId);
+
+    const before = await page.evaluate((vid) => {
+      const v = document.getElementById(vid);
+      return { paused: v.paused, hasSrcObject: !!v.srcObject };
+    }, videoId);
+    expect(before.paused).toBe(false);
+    expect(before.hasSrcObject).toBe(true);
+
+    // Reclaim the video back into the document (as if the caller keeps it
+    // mounted elsewhere) before tearing the element down, so Chromium's
+    // native "pause on remove from document" behavior for a srcObject video
+    // doesn't mask what destroy() itself does to a caller-owned video.
+    const after = await page.evaluate(([eid, vid]) => {
+      const el = window.elements[eid];
+      const v = document.getElementById(vid);
+      document.body.appendChild(v);
+      el.remove();
+      return { paused: v.paused, hasSrcObject: !!v.srcObject };
+    }, [id, videoId]);
+    expect(after.paused).toBe(false);
+    expect(after.hasSrcObject).toBe(true);
   });
 });

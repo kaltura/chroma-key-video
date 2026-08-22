@@ -10,12 +10,17 @@
 </head>
 <body>
 <div id="stage"></div>
+<!-- hls.js dist is a UMD/global build, loaded as a classic script (executes
+     before the deferred module script below) so `window.Hls` exists when
+     the test helpers that use it run. Test-only devDependency. -->
+<script src="/node_modules/hls.js/dist/hls.min.js"></script>
 <script type="module">
 import { ChromaKeyVideo, defineChromaKeyVideoElement, autoTunePlugin, DEFAULTS } from '/src/chromakey.js';
 
 window.CKV = { ChromaKeyVideo, defineChromaKeyVideoElement, autoTunePlugin, DEFAULTS };
 window.players = {};
 let nextId = 1;
+let nextMediaId = 1;
 
 const W = 320, H = 240;
 
@@ -118,6 +123,87 @@ window.resizeSource = (id, w, h) => {
   drawPattern(sourceCanvas.getContext('2d'), channel);
 };
 
+// Real WebRTC source (issue #6): sends the pattern track through an actual
+// loopback RTCPeerConnection pair (real SDP offer/answer, real ICE, real
+// SRTP encode/decode) and returns a <video> wired to the *remote* track via
+// `srcObject`, hidden and appended to the document — not the same object as
+// captureStream()'s own MediaStream, so this exercises the real WebRTC media
+// pipeline rather than only the synthetic capture path used elsewhere.
+// No STUN/TURN/network is needed: both peers are local objects in the same
+// page, so ICE resolves over the loopback interface.
+window.__mediaCleanup = [];
+window.cleanupMedia = () => {
+  while (window.__mediaCleanup.length) {
+    try { window.__mediaCleanup.pop()(); } catch { /* best-effort */ }
+  }
+};
+
+window.createWebRTCVideo = async (channel = 'green', w = W, h = H, fps = 30) => {
+  const { stream, timer } = makePatternStream(channel, w, h, fps);
+  const pc1 = new RTCPeerConnection();
+  const pc2 = new RTCPeerConnection();
+  window.__mediaCleanup.push(() => {
+    clearInterval(timer);
+    pc1.close();
+    pc2.close();
+  });
+  pc1.onicecandidate = (e) => { if (e.candidate) pc2.addIceCandidate(e.candidate); };
+  pc2.onicecandidate = (e) => { if (e.candidate) pc1.addIceCandidate(e.candidate); };
+  const remoteStreamPromise = new Promise((resolve) => {
+    pc2.ontrack = (e) => resolve(e.streams[0]);
+  });
+  for (const track of stream.getTracks()) pc1.addTrack(track, stream);
+  const offer = await pc1.createOffer();
+  await pc1.setLocalDescription(offer);
+  await pc2.setRemoteDescription(offer);
+  const answer = await pc2.createAnswer();
+  await pc2.setLocalDescription(answer);
+  await pc1.setRemoteDescription(answer);
+  const remoteStream = await remoteStreamPromise;
+
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.style.display = 'none';
+  video.srcObject = remoteStream;
+  const id = 'webrtc-' + nextMediaId++;
+  video.id = id;
+  document.body.appendChild(video);
+  await new Promise((resolve) => video.addEventListener('loadedmetadata', resolve, { once: true }));
+  return id;
+};
+
+// Real HLS source (issue #6): loads an actual generated VOD fixture
+// (test/assets/hls/playlist.m3u8, 3 segments) through hls.js — a real
+// third-party player library attaching to a <video> element, the exact
+// shape the slotted-video mechanism exists to support — and returns the
+// <video> id once its manifest is parsed and media is attached.
+window.createHlsVideo = (url = '/test/assets/hls/playlist.m3u8') => {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.style.display = 'none';
+    document.body.appendChild(video);
+    const hls = new Hls();
+    window.__mediaCleanup.push(() => hls.destroy());
+    const timeout = setTimeout(() => reject(new Error('hls manifest never parsed')), 10000);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      clearTimeout(timeout);
+      const id = 'hls-' + nextMediaId++;
+      video.id = id;
+      resolve(id);
+    });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) { clearTimeout(timeout); reject(new Error('hls fatal error: ' + data.type)); }
+    });
+    hls.loadSource(url);
+    hls.attachMedia(video);
+  });
+};
+
 // Record ~1.2s of the pattern to a webm blob and return an object URL —
 // exercises the URL-source constructor path with a real encoded video.
 window.makePatternVideoURL = (channel = 'green') => {
@@ -177,6 +263,54 @@ window.destroyPlayer = (id) => {
     if (entry.timer) clearInterval(entry.timer);
     delete window.players[id];
   }
+};
+
+// Mounts a <chroma-key-video> custom element (issue #6). `videoId`, if given,
+// is the id of a <video> already in the document (from createWebRTCVideo/
+// createHlsVideo/plain createElement) — it's appended as a light-DOM child
+// (slotted source) before connecting the element, so slot detection sees it
+// on the same tick as connectedCallback. `attrs.src` can be set alongside a
+// slotted video to exercise precedence.
+window.elements = {};
+window.mountElement = (attrs = {}, videoId = null) => {
+  return new Promise((resolve, reject) => {
+    window.CKV.defineChromaKeyVideoElement();
+    const el = document.createElement('chroma-key-video');
+    el.style.width = '320px'; // give the host a definite CSS size (no aspect-ratio-only auto-sizing)
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === false || v == null) continue;
+      el.setAttribute(k, v === true ? '' : String(v));
+    }
+    if (videoId) el.appendChild(document.getElementById(videoId));
+    const id = 'el-' + nextMediaId++;
+    window.elements[id] = el;
+    document.getElementById('stage').appendChild(el);
+    const timeout = setTimeout(() => reject(new Error('element player never started')), 10000);
+    // A slotted video can already be decoding (WebRTC/HLS were readied before
+    // being appended), so the player's first frame — and its 'started' event —
+    // can fire synchronously inside connectedCallback, before this polling
+    // loop gets a chance to attach a listener. Check frameCount first so an
+    // already-fired 'started' isn't missed.
+    const waitStarted = () => {
+      if (!el.player) { setTimeout(waitStarted, 20); return; }
+      const settle = () => setTimeout(() => { clearTimeout(timeout); resolve(id); }, 200);
+      if (el.player.frameCount > 0) { settle(); return; }
+      el.player.addEventListener('started', settle, { once: true });
+      el.player.addEventListener('error', (e) => reject(e.detail));
+    };
+    waitStarted();
+  });
+};
+
+// Samples one pixel of a mounted element's display canvas (same convention
+// as window.sample, but reading through window.elements instead of players).
+window.sampleElement = (id, xf, yf) => {
+  const c = window.elements[id].player.canvas;
+  const ctx = c.getContext('2d');
+  const x = Math.min(c.width - 1, Math.round(xf * c.width));
+  const y = Math.min(c.height - 1, Math.round(yf * c.height));
+  const d = ctx.getImageData(x, y, 1, 1).data;
+  return [d[0], d[1], d[2], d[3]];
 };
 
 window.fixtureReady = true;

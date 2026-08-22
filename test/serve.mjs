@@ -20,6 +20,8 @@ const MIME = {
   '.webm': 'video/webm',
   '.mp4': 'video/mp4',
   '.png': 'image/png',
+  '.m3u8': 'application/vnd.apple.mpegurl',
+  '.ts': 'video/mp2t',
 };
 
 createServer(async (req, res) => {
