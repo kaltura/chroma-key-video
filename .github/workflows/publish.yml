@@ -1,0 +1,60 @@
+# Publishes to npm on every GitHub Release. jsDelivr needs no separate step:
+# it mirrors npm packages automatically (cdn.jsdelivr.net/npm/chroma-key-video),
+# so the purge step below just clears its cache for unpinned/@latest URLs —
+# version-pinned URLs are immutable and always fresh with no purge needed.
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release tag matches package.json version
+        run: |
+          TAG="${TAG_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "Release tag $TAG_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+
+      - name: Syntax check
+        run: node --check src/chromakey.js
+
+      - name: Bundle size gate
+        run: npm run check:size
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E tests
+        run: npm test
+
+      - name: Publish to npm
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Purge jsDelivr cache for unpinned URLs
+        run: |
+          curl -fsS "https://purge.jsdelivr.net/npm/chroma-key-video/src/chromakey.js"
+          curl -fsS "https://purge.jsdelivr.net/npm/chroma-key-video@latest/src/chromakey.js"

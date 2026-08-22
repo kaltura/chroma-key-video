@@ -1,6 +1,7 @@
 # chroma-key-video
 
 [![CI](https://github.com/kaltura/chroma-key-video/actions/workflows/ci.yml/badge.svg)](https://github.com/kaltura/chroma-key-video/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/chroma-key-video)](https://www.npmjs.com/package/chroma-key-video)
 [![Bundle size](https://img.shields.io/badge/minified-24KB-blue)](scripts/check-size.mjs)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -12,6 +13,22 @@ Real-time green/blue-screen keying for HTML video, in the browser. Point it at a
 - **Works everywhere.** WebGL with an automatic Canvas2D (CPU) fallback running the identical math, plus WebGL context-loss recovery.
 - **Optional edge dissolve.** Blur + bottom vignette + top/bottom alpha fades that make a keyed presenter read as part of the page instead of a video rectangle.
 - **Auto-tune.** Derives `minKey`/`bias`/`softness` from the footage itself — once on the first frame or continuously as lighting changes — via a tiny sandboxed plugin system you can extend.
+
+## Install
+
+```bash
+npm install chroma-key-video
+```
+
+Or straight from a CDN, no install or build step:
+
+```html
+<script type="module">
+  import { ChromaKeyVideo } from 'https://cdn.jsdelivr.net/npm/chroma-key-video/src/chromakey.js';
+</script>
+```
+
+Pin a version for production (`@1.2.0` instead of unpinned) so a new release can't change behavior under you.
 
 ## Quick start
 
