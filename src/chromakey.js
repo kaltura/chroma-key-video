@@ -1384,7 +1384,10 @@ const ELEMENT_OPTION_ATTRIBUTES = {
  * Other supported attributes: `autoplay`, `loop`, `muted`, `channel`,
  * `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`,
  * `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`,
- * `fade-bottom`, `max-pixel-ratio`, `stall-timeout`.
+ * `fade-bottom`, `max-pixel-ratio`, `stall-timeout`. `autoplay`/`loop`/
+ * `muted`/`crossorigin` only affect a video the element creates itself
+ * (from `src`) — a slotted `<video>` is caller-owned and caller-configured,
+ * so these attributes have no effect on it.
  *
  * The underlying player is exposed as the element's `.player` property for
  * full programmatic control (events, `update()`, the video element, etc.).
@@ -1401,7 +1404,7 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
       super();
       this._root = this.attachShadow({ mode: 'closed' });
       const style = document.createElement('style');
-      style.textContent = ':host{display:inline-block;line-height:0}canvas{display:block;width:100%;height:100%}::slotted(video){display:none}';
+      style.textContent = ':host{display:inline-block;line-height:0}canvas{display:block;width:100%;height:100%}::slotted(*){display:none}';
       this._root.appendChild(style);
       this._slot = document.createElement('slot');
       this._slot.addEventListener('slotchange', () => this._handleSlotChange());
@@ -1436,6 +1439,10 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
     attributeChangedCallback(name, oldValue, newValue) {
       if (!this.isConnected || oldValue === newValue) return;
       if (name === 'src') {
+        // A slotted video (if present) always wins over src (see _build()),
+        // so a src change is a no-op while one is active — rebuilding here
+        // would destroy and recreate the player against the same source.
+        if (this._getSlottedVideo()) return;
         this._teardown();
         this._build();
         return;

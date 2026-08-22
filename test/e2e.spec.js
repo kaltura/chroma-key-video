@@ -91,6 +91,13 @@ test.describe('chroma-key-video', () => {
     await openFixture(page);
   });
 
+  test.afterEach(async ({ page }) => {
+    // Releases RTCPeerConnections/hls.js instances/redraw timers created by
+    // createWebRTCVideo()/createHlsVideo() (issue #6), so they don't linger
+    // for the rest of this page's lifetime across a whole file's test run.
+    await page.evaluate(() => window.cleanupMedia());
+  });
+
   test('WebGL backend keys green to transparent and keeps foreground', async ({ page }) => {
     const id = await create(page);
     expect(await backend(page, id)).toBe('webgl');
@@ -596,6 +603,21 @@ test.describe('chroma-key-video', () => {
       [id, videoId],
     );
     expect(usesSlotted).toBe(true);
+  });
+
+  test('custom element: changing src while a video is slotted does not rebuild the player (issue #6)', async ({ page }) => {
+    const videoId = await webrtcVideo(page);
+    const url = await page.evaluate(() => window.makePatternVideoURL());
+    const id = await mountElement(page, {}, videoId);
+
+    const rebuilt = await page.evaluate(async ([eid, u]) => {
+      const el = window.elements[eid];
+      const player = el.player;
+      el.setAttribute('src', u);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return el.player !== player || player.isDestroyed;
+    }, [id, url]);
+    expect(rebuilt).toBe(false);
   });
 
   test('custom element: swapping the slotted <video> at runtime rebuilds the player without leaking the old one (issue #6)', async ({ page }) => {

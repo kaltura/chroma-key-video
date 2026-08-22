@@ -105,6 +105,11 @@ The output canvas behaves like an `<img>`. Give it a CSS size, or let it default
 
 `defineChromaKeyVideoElement(tagName?)` registers the element.
 
+- **Source:** either a slotted `<video>` child or the `src` attribute. A slotted `<video>` takes precedence over `src` when both are present, and can be any source the video element itself supports — file, `MediaStream`, WebRTC, hls.js/dash.js-attached, etc.:
+  ```html
+  <chroma-key-video auto-tune><video id="my-live-video"></video></chroma-key-video>
+  ```
+  The slotted video is caller-owned: `autoplay`/`loop`/`muted`/`crossorigin` have no effect on it (configure it directly), and it's never paused or cleared by `destroy()`/disconnection. Swapping the slotted `<video>` at runtime rebuilds the player against the new source.
 - **Attributes:** `src`, `autoplay`, `loop`, `muted`, `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`, `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`, `fade-bottom`, `max-pixel-ratio`.
 - Numeric attributes update live.
 - The underlying player is exposed as `element.player`.
