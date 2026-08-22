@@ -1373,8 +1373,16 @@ const ELEMENT_OPTION_ATTRIBUTES = {
 /**
  * Register the `<chroma-key-video>` custom element.
  *
- * Supported attributes: `src` (required), `autoplay`, `loop`, `muted`,
- * `channel`, `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`,
+ * Source: either a slotted `<video>` child (any source the video element
+ * itself supports — file, MediaStream via `srcObject`, WebRTC, hls.js/
+ * dash.js-attached, etc.) or the `src` attribute (a plain URL). A slotted
+ * video takes precedence over `src` when both are present. Swapping the
+ * slotted `<video>` at runtime rebuilds the player; the slotted element is
+ * caller-owned throughout, so `destroy()`/disconnection never pauses or
+ * clears it (see issue #6).
+ *
+ * Other supported attributes: `autoplay`, `loop`, `muted`, `channel`,
+ * `min-key`, `bias`, `softness`, `spill`, `edge-dissolve`,
  * `auto-tune` (empty = once, `"adaptive"` = continuous), `fade-top`,
  * `fade-bottom`, `max-pixel-ratio`, `stall-timeout`.
  *
@@ -1393,8 +1401,12 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
       super();
       this._root = this.attachShadow({ mode: 'closed' });
       const style = document.createElement('style');
-      style.textContent = ':host{display:inline-block;line-height:0}canvas{display:block;width:100%;height:100%}';
+      style.textContent = ':host{display:inline-block;line-height:0}canvas{display:block;width:100%;height:100%}::slotted(video){display:none}';
       this._root.appendChild(style);
+      this._slot = document.createElement('slot');
+      this._slot.addEventListener('slotchange', () => this._handleSlotChange());
+      this._root.appendChild(this._slot);
+      this._activeVideoSource = null;
       this._player = null;
     }
 
@@ -1404,6 +1416,22 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
     connectedCallback() { this._build(); }
 
     disconnectedCallback() { this._teardown(); }
+
+    /** First slotted light-DOM <video> child, or null. */
+    _getSlottedVideo() {
+      for (const child of this.children) {
+        if (child instanceof HTMLVideoElement) return child;
+      }
+      return null;
+    }
+
+    _handleSlotChange() {
+      if (!this.isConnected) return;
+      const newVideo = this._getSlottedVideo();
+      if (newVideo === this._activeVideoSource) return;
+      this._teardown();
+      this._build();
+    }
 
     attributeChangedCallback(name, oldValue, newValue) {
       if (!this.isConnected || oldValue === newValue) return;
@@ -1441,9 +1469,11 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
     }
 
     _build() {
-      const src = this.getAttribute('src');
-      if (!src) return;
-      this._player = new ChromaKeyVideo(src, this._collectOptions());
+      const slottedVideo = this._getSlottedVideo();
+      const source = slottedVideo || this.getAttribute('src');
+      if (!source) return;
+      this._activeVideoSource = slottedVideo;
+      this._player = new ChromaKeyVideo(source, this._collectOptions());
       this._root.appendChild(this._player.canvas);
       this._lastAppliedAspect = '';
       this._syncAspect = () => syncAspectRatio(this, this._player.video, this);
@@ -1459,6 +1489,7 @@ export function defineChromaKeyVideoElement(tagName = 'chroma-key-video') {
         this._player.destroy();
         this._player = null;
       }
+      this._activeVideoSource = null;
     }
   }
 
